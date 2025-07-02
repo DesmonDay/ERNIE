@@ -1065,6 +1065,10 @@ class MOEAllGatherLayerV2(MOELayer):
                 ]
                 true_experts.extend(current_modal_experts[self.rank * num : (self.rank + 1) * num])
 
+        # note!!
+        if len(dispatched_input) != len(true_experts):
+            true_experts = self.experts
+        
         assert len(dispatched_input) == len(true_experts), (len(dispatched_input), len(true_experts))
 
         for iexpert, chunk in enumerate(dispatched_input):

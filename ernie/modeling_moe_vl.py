@@ -697,7 +697,7 @@ class Ernie4_5_MoeVLHead(Ernie4_5_LMHead):
         if not use_cache:
             mm_head_weight = self.mm_head.weight if self.mm_head is not None else None
             mm_head_bias = self.mm_head.bias if self.mm_head is not None else None
-            logits_text, logits_image = calc_multimodal_logits(
+            logits_text, logits_image, *_ = calc_multimodal_logits( # note!!
                 hidden_state,
                 self.weight,
                 self.bias,

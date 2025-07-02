@@ -454,7 +454,8 @@ class MOELayer(nn.Layer):
             self.rank = 0
 
         self.multimodal_experts = isinstance(moe_num_experts, (tuple, list)) and len(moe_num_experts) > 1
-        self.num_local_experts = len(self.experts) // self.world_size
+        # self.num_local_experts = len(self.experts) // self.world_size note!!
+        self.num_local_experts = len(self.experts)
         if self.multimodal_experts:
             self.num_local_multimodal_experts = [num // self.world_size for num in moe_num_experts]
             self.multimodal_expert_index = [0] + list(itertools.accumulate(moe_num_experts))

@@ -1,5 +1,3 @@
-# !/usr/bin/env python3
-
 # Copyright (c) 2025 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -14,21 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""
-ImageModificationProcessorArguments
+"""This module contains end2end processor"""
 
-"""
+from data_processor.steps.end2end_processing import End2EndProcessor, End2EndProcessorArguments
 
-from dataclasses import dataclass, field
-
-
-@dataclass
-class ImageModificationProcessorArguments:
-    """
-    args for ImageModificationProcessor
-    """
-
-    image_token_len: int = field(default=64, metadata={"help": "image placeholder num per frame"})
-    image_dtype: str = field(default="uint8", metadata={"help": "image dtype"})
-    render_timestamp: bool = field(default=False, metadata={"help": "render timestamp"})
-    sft_shift_by_one: bool = field(default=False, metadata={"help": "SFT data_processor shift-by-one"})
+__all__ = [
+    'End2EndProcessor',
+    'End2EndProcessorArguments',
+]
