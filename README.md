@@ -6,7 +6,7 @@
 
 [ERNIE Bot](https://ernie.baidu.com/) |  [🤗Hugging Face](https://huggingface.co/baidu) | [AI Studio](https://aistudio.baidu.com/modelsoverview) 
 
-📑 [Blog](https://yiyan.baidu.com/blog/posts/ernie4.5) | 📚 [Cookbook](./cookbook/) | 📑 [Paper](https://yiyan.baidu.com/blog/publication/)
+📑 [Blog](https://yiyan.baidu.com/blog/posts/ernie4.5) | 📚 [Cookbook](./cookbook/) | 📑 [Paper](https://yiyan.baidu.com/blog/publication/)  | 🛠️ [Training](./docs/erniekit.md)  | ⚡️ [Deploy](https://github.com/PaddlePaddle/FastDeploy)
 
 </div>
 
@@ -243,6 +243,12 @@ Discover best-practice guides showcasing ERNIE’s capabilities across multiple 
 </div>
 
 </br>
+
+## Community
+
+| PaddlePaddle WeChat official account |  Join the tech discussion group |
+| :---: | :---: |
+| <img src="https://github.com/user-attachments/assets/864a45ec-0773-44b2-a2f1-c0e21e157792" width="150"> | <img src="https://github.com/user-attachments/assets/52e05674-7143-4207-8b19-67247fe88f55" width="150"> |
 
 ## License
 
