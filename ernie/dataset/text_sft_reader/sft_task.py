@@ -19,7 +19,7 @@ import json
 import numpy as np
 from paddle.io import IterableDataset
 
-from .finetuning import KnowledgeBasedSFTReader, SFTH5Reader
+from .finetuning import KnowledgeBasedSFTReader
 
 IDTYPES_2_ID = {"text": 0, "image": 1, "video": 2, "audio": 3}
 IMAGETYPES_2_ID = {"image": 0, "video": 1, "padded_image": 2}
@@ -61,8 +61,6 @@ def create_pyreader(config_dataset):
     """
     if config_dataset["dataset_name"] == "KnowledgeBasedSFTReader":
         data_reader = KnowledgeBasedSFTReader(**config_dataset)
-    elif config_dataset["dataset_name"] == "SFTH5Reader":
-        data_reader = SFTH5Reader(**config_dataset)
     else:
         raise ValueError(f"Unknown dataset: {config_dataset['dataset_name']}")
     return data_reader

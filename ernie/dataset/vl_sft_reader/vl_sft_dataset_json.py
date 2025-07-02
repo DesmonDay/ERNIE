@@ -19,7 +19,6 @@ read dataset json for vl_sft
 import gzip
 import json
 import logging
-import math
 import random
 import re
 from collections import OrderedDict, namedtuple
@@ -28,14 +27,10 @@ from copy import deepcopy
 import numpy as np
 import paddle
 
-IDTYPES_2_ID = {"text": 0, "image": 1, "video": 2, "audio": 3}
-IMAGETYPES_2_ID = {"image": 0, "video": 1, "padded_image": 2}
 DATATYPE_2_ID = {"mm": 0, "lm": 1, "audio": 2}
 
 from contextlib import contextmanager
 
-from paddle import distributed as dist
-from paddle.distributed import fleet
 from paddle.io import IterableDataset
 
 log = logging.getLogger(__name__)
@@ -77,67 +72,6 @@ def make_seed(*args):
     for arg in args:
         seed = hash(seed * 1e3 + hash(arg)) & 0x7FFFFFFF
     return seed
-
-
-def get_global_data_info():
-    """
-    获取全局数据的信息。
-
-    Args:
-        无。
-
-    Returns:
-        tuple: 包含两个元素的元组，分别表示全局数据的排名和全局数据的大小。
-
-    """
-    if dist.get_world_size() > 1:
-        hcg = fleet.get_hybrid_communicate_group()
-        dp_rank = hcg.get_data_parallel_rank()
-        dp_size = hcg.get_data_parallel_world_size()
-        sharding_rank = hcg.get_sharding_parallel_rank()
-        sharding_size = hcg.get_sharding_parallel_world_size()
-        global_data_rank = dp_rank * sharding_size + sharding_rank
-        global_data_size = dp_size * sharding_size
-        log.info(f"global_data_rank: {global_data_rank}, global_data_size: {global_data_size}")
-        return global_data_rank, global_data_size
-    else:
-        return 0, 1
-
-
-def equal_shard(datasets, rank, world_size):
-    """
-    如果有权重，根据权重概率累计概率相等的原则切分 train part.
-    没有权重直接均分parts.
-    args:
-        datasets: List[ExampleSetSingleDataSource]
-        rank: int
-        world_size: int
-    """
-    assert len(datasets) >= world_size, f"#filelist={len(datasets)} < world_size{world_size}"
-    if world_size == 1:
-        return datasets
-
-    if datasets[0]['weight'] is None:
-        ran = np.array_split(np.arange(len(datasets)), world_size)[rank]
-        s, e = ran[0], ran[-1]
-        shard = datasets[s : e + 1]
-        return shard
-    buckets = [[] for _ in range(world_size)]
-
-    bucketsize = np.zeros(len(buckets), dtype="float64")
-
-    datasets = sorted(datasets, key=lambda d: d['weight'], reverse=True)  # 先分大part，或许有利于均匀分发？
-    for d in datasets:
-        this_bucket = np.argmin(bucketsize)
-        buckets[this_bucket].append(d)
-        bucketsize[this_bucket] += d['weight']
-
-    log.info(f"sharding dataset according to prob, group vs probs={[sum([rr['weight'] for rr in r])for r in buckets]}")
-    bucketsize = bucketsize[rank]
-    diff = bucketsize - (1 / world_size)
-    log.info(f"unable to perfect shard. prob sum of this bucket:{bucketsize}, diff to perfect portion:{diff}")
-    assert len(buckets) == world_size, f"#ret={len(buckets)} prob not normalized:{[d['weight'] for d in datasets]}"
-    return buckets[rank]
 
 
 @contextmanager
@@ -285,79 +219,6 @@ class ExampleSet:
             yield ret
 
 
-class ExampleSetSingleDataSource(IterableDataset):
-    """use to manage multiple json file_names"""
-
-    def __init__(
-        self,
-        src,
-        file_list,
-        prompt_list,
-        seqlen,
-        weight=None,
-        seed: int = 42,
-        shuffle: bool = False,
-        shuffle_files: bool = False,
-        shuffle_json: bool = False,
-        num_consecutive: int = 1,
-        dataset_type=None,
-        name=None,
-        batch_size=1,
-        dp_rank=None,
-        dp_size=None,
-        process_fn=None,
-        dp_shard_data=True,
-    ):
-
-        self.file_list = file_list if isinstance(file_list, list) else [file_list]
-
-        self.src = int(src)
-
-        self.prompt_list = prompt_list
-
-        self.dataset_type = dataset_type
-        self.name = name
-        self.process_fn = process_fn
-
-        self.seqlen = seqlen
-        self.weight = weight
-        self.seed = seed
-        self.shuffle_files = shuffle_files
-        self.shuffle_json = shuffle_json
-
-        self.length = 0
-        self.epoch = 0
-        self.batch_size = batch_size
-        self._sub_datasets = []
-        self._load_single_source()
-
-    def _load_single_source(self):
-        log.info(f"loading data source:{self.src}, weight={self.weight},json_lists={self.file_list}")
-        for path in self.file_list:
-            example = ExampleSet(
-                file_name=path,
-                src=self.src,
-                prompt_list=self.prompt_list,
-                shuffle_json=self.shuffle_json,
-                process_fn=self.process_fn,
-            )
-            self._sub_datasets.append(example)
-            self.length += len(example)
-
-    def __len__(self):
-        return math.ceil(self.length / self.batch_size) * self.batch_size
-
-    def __iter__(self):
-        while True:
-            if self.shuffle_files:
-                sub_datasets = self._sub_datasets
-                np.random.shuffle(self._sub_datasets)
-            else:
-                sub_datasets = self._sub_datasets
-            for ds in sub_datasets:
-                yield from ds
-
-
 class SFTMultimodalDatasetJson(IterableDataset):
     """
     SFT Multimodal Dataset Json
@@ -501,93 +362,18 @@ class SFTMultimodalDatasetJson(IterableDataset):
             meta["prefix"] = "<think>\n\n</think>\n\n"
         return meta
 
-    def _load(self, use_shard=True, shuffle_files=True, shuffle_json=True):
-        single_source_list = []
-        source_sub_info = {}
-
-        weight_sum = sum([dataset_info["weight"] for dataset_info in self.dataset_config])
-        log.info(f"weight_sum of all src: {weight_sum}")
-
-        for dataset_info in self.dataset_config:
-            src = dataset_info["src_id"]
-            filelist = dataset_info["filelist"]
-
-            weight = dataset_info["weight"]
-
-            if weight == 0:
-                continue
-
-            name = dataset_info["name"]
-            process_fn = None
-            dataset_type = dataset_info.get("dataset_type", None)
-            if dataset_type is not None and dataset_type == 'video':
-                process_fn = self.example_to_feature_stage3_video
-            else:
-                process_fn = self.example_to_feature_stage3
-
-            prompt_file = dataset_info.get("prompt_file", None)
-            if prompt_file is not None:
-                with open(prompt_file) as f:
-                    prompt_list = f.read().strip().split("\n")
-            else:
-                prompt_list = None
-            file_lists = self.load_files_info(filelist)
-
-            source_sub_info[int(src)] = {
-                'prompt_list': prompt_list,
-                'weight': weight / weight_sum,
-                'name': name,
-                'dataset_type': dataset_type,
-                'process_fn': process_fn,
-                'file_list': [],
-            }
-
-            weight = weight / len(file_lists) / weight_sum
-
-            for file_list in file_lists:
-                single_source_info = {
-                    "src": int(src),
-                    "file_list": file_list,
-                    "weight": weight,
-                }
-                single_source_list.append(single_source_info)
-
-        if use_shard:
-            example_per_dp = equal_shard(single_source_list, self.data_rank, self.data_size)
-        else:
-            example_per_dp = single_source_list
-
-        log.debug(
-            f"using source shard, # files before shard={len(single_source_list)}, after shard={len(example_per_dp)}"
+    def _load(self, shuffle_json=True):
+        process_fn = self.example_to_feature_stage3
+        part = ExampleSet(
+            file_name=self.dataset_config,
+            src=1,
+            prompt_list=None,
+            shuffle_json=shuffle_json,
+            process_fn=process_fn,
         )
-
-        for example in example_per_dp:
-            source_sub_info[example['src']]['file_list'].append(example['file_list'])
-
-        for src, info in source_sub_info.items():
-            file_list = info.pop('file_list')
-            if len(file_list) == 0:
-                continue
-            part = ExampleSetSingleDataSource(
-                src=src,
-                file_list=file_list,
-                seqlen=self.seqlen,
-                seed=self.seed,
-                shuffle_files=shuffle_files,
-                shuffle_json=shuffle_json,
-                batch_size=self.batch_size,
-                dp_rank=self.data_rank,
-                dp_size=self.data_size,
-                **info,
-            )
-
-            self.task_group[part.src] = iter(part)
-            self.weight_list.append(part.weight)
-            self.src_id_list.append(part.src)
-            self.length += len(part)
-
-        weight_sum = sum(self.weight_list)
-        self.weight_list = [item / weight_sum for item in self.weight_list]
+        self.task_group[part.src] = part
+        self.src_id_list.append(part.src)
+        self.length += len(part)
 
     def example_to_feature_stage3(self, example):
         """
@@ -702,9 +488,8 @@ class SFTMultimodalDatasetJson(IterableDataset):
 
     def __iter__(self):
         while True:
-            np.random.seed(make_seed(self.local_seed, self.epoch))
-            sample_list = np.random.choice(self.src_id_list, size=5120, p=self.weight_list)
+            sample_list = np.random.choice(self.src_id_list, size=5120)
             self.epoch += 1
             for sample in sample_list:
-                data = next(self.task_group[int(sample)])
-                yield data
+                data = self.task_group[int(sample)]
+                yield from data

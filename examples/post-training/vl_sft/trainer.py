@@ -79,22 +79,11 @@ from paddleformers.utils.batch_sampler import DistributedBatchSampler
 from paddleformers.utils.batch_sampler import DistributedBatchSampler as NlpDistributedBatchSampler
 
 # from paddlenlp.utils.env import PADDLE_WEIGHTS_NAME
-from pretraining_trainer import PreTrainingArguments, PretrainingTrainer
+from pretraining_trainer import PretrainingTrainer
 
 from ernie.dataset.dist_data_loader import DistDataLoader
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class SFTArguments(PreTrainingArguments):
-    """
-    The arguments used to initialize the SFTTrainer class.
-    """
-
-    resume_from_ptx_model: Optional[bool] = field(
-        default=True, metadata={"help": "load pretrained weights from ptx_upload_dir"}
-    )
 
 
 class SFTTrainer(PretrainingTrainer):

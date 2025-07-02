@@ -33,7 +33,8 @@ from paddle.distributed import fleet
 from paddleformers.datasets import IterDataset
 from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
 from paddleformers.utils.tools import get_env_device
-from trainer import SFTArguments, SFTTrainer
+from pretraining_trainer import PreTrainingArguments
+from trainer import SFTTrainer
 
 from ernie.callbacks import (
     GlobalRNGCallback,
@@ -43,11 +44,12 @@ from ernie.callbacks import (
     PPNeedDataCallback,
     VitTrainableCallback,
 )
-from ernie.configuration import Ernie4_5_Config, Ernie4_5_VLMoeConfig
+from ernie.configuration import Ernie4_5_VLMoeConfig
+
 from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreader
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
-from ernie.dataset.vl_sft_reader.data_processor import End2EndProcessor, End2EndProcessorArguments
 from ernie.dataset.vl_sft_reader.data_utils import merge_fn_group_batch
+
 from ernie.dfnrope import DFNRopeVisionTransformerConfig
 from ernie.modeling_moe_vl import Ernie4_5_VLMoeForConditionalGeneration
 
@@ -56,6 +58,7 @@ from ernie.utils.misc import global_training_logs
 from ernie.utils.mm_data_utils import MMSpecialTokensConfig
 from ernie.utils.seed_utils import set_seed
 
+from data_processor.steps.end2end_processing import End2EndProcessor, End2EndProcessorArguments
 from data_processor.image_preprocessor.image_preprocessor_adaptive import AdaptiveImageProcessor
 from data_processor.tokenizer.get_tokenizer import get_tokenizer
 
@@ -63,7 +66,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class ChatSFTArguments(SFTArguments):
+class ChatSFTArguments(PreTrainingArguments):
     """Chat SFT Arguments"""
 
     data_filelist: str = field(default=None, metadata={"help": "sft vl data config"})
@@ -133,6 +136,10 @@ class ChatSFTArguments(SFTArguments):
     )
     rope_3d: Optional[bool] = field(default=True, metadata={"help": "use rope3d"})
     moe_with_send_router_loss: bool = field(default=False, metadata={"help": "use send router loss"})
+
+    resume_from_ptx_model: Optional[bool] = field(
+        default=True, metadata={"help": "load pretrained weights from ptx_upload_dir"}
+    )
 
 
 def get_tp_split_ckpt(args, path):
@@ -591,11 +598,8 @@ def main():
 
         if args.need_data:
             if args.multimodal:
-                with open(args.data_filelist, "r") as f:
-                    dataset_config = yaml.load(f.read(), yaml.FullLoader)
-
                 train_dataset = SFTMultimodalDatasetJson(
-                    dataset_config=dataset_config["datasets"],
+                    dataset_config=args.data_filelist,
                     tokenizer=tokenizer,
                     image_preprocess=image_preprocess,
                     seed=args.random_seed,
@@ -616,11 +620,11 @@ def main():
                     dp_size=args.reeao_dataset_world_size,
                     data_processor=data_processor,
                 )
-                train_dataset._load(shuffle_files=False, shuffle_json=False)
+                train_dataset._load(shuffle_json=False)
                 train_dataset = IterDataset(
                     MixExampleSetJson(
                         lm_weights=0.0,
-                        mm_weights=dataset_config.get("mm_weights", 1.0),
+                        mm_weights=1.0,
                         lm_example_set=None,
                         mm_example_set=train_dataset,
                     )

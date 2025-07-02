@@ -18,12 +18,10 @@
 logging callback
 """
 
-import logging
 import os
 
 from paddleformers.trainer.trainer_callback import TrainerCallback
-
-logger = logging.getLogger(__name__)
+from paddleformers.utils.log import logger
 
 
 class LoggingCallback(TrainerCallback):

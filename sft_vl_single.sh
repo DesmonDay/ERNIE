@@ -30,7 +30,7 @@ nohup sh examples/post-training/vl_sft/script/train_gpu_single.sh \
 --global_shuffle_num_examples 1000000 \
 --sequence_parallel 1 \
 --moe_use_aux_free_update_coef 0.0 \
---data_filelist /root/paddlejob/workspace/env_run/output/wenxinhao/SFT_45V/data_config/mm_sft/data_config_debug_json_mul.yaml \
+--data_filelist /root/paddlejob/workspace/env_run/output/wenxinhao/SFT_45V/data_config/mm_sft/test_json_h5/ebv_data_sft_codemmsft_1003-part-00000_0.jsonl \
 --visual_ld 0.9 \
 --modality_ratio [1,1] \
 --moe_gate_lr_ratio 0.01 \
@@ -81,4 +81,4 @@ nohup sh examples/post-training/vl_sft/script/train_gpu_single.sh \
 --skip_profile_timer 0 \
 --save_sharding_stage1_model_include_freeze_params true \
 --disable_pipeline_warmup true \
-> lite_erniekits_1step.log 2>err &
+> lite_erniekits_1step.log 2>err.log &

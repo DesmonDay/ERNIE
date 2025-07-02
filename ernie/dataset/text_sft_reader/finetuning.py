@@ -23,7 +23,6 @@ import random
 import re
 from collections import defaultdict, namedtuple
 
-import h5py
 import numpy as np
 import paddle
 import ujson as json
@@ -31,7 +30,7 @@ from paddleformers.trainer import TrainerState
 from paddleformers.trainer.trainer import TRAINER_STATE_NAME
 
 from .data_utils import RandomNoReplacementSampler, contains_markup, pad_batch_data, sampling_pseudo_examples
-from .pvp import EBMarkUpRouter
+from ernie.dataset.pvp import EBMarkUpRouter
 
 logger = logging.getLogger(__name__)
 
@@ -1249,98 +1248,3 @@ class KnowledgeBasedSFTReader(BaseReader):
                 padded_batch_exact_total_task_ids.astype("int64"),
             ]
         return return_list
-
-
-class SFTH5Reader(BaseReader):
-    """
-    Reader for SFT H5 dataset.
-    """
-
-    def _read_h5(self, filepath):
-        dataset = h5py.File(filepath, 'r')
-        return dataset
-
-    def _prepare_batch_data(self, dataset, indices):
-        """
-        generate batch records
-            NOTE: 当前只支持开启FA或者MEA训练
-        """
-        input_keys = [
-            "input_ids",
-            "position_ids",
-            "inbatch_pack_offset",
-            "labels",
-            "loss_mask",
-            "exact_total_task_ids",
-        ]
-        if self.use_agent_sys2:
-            for idx in indices:
-                return_ls = []
-                flag = True
-                for key in input_keys:
-                    return_ls.append(dataset[key][idx])
-                    if key == "position_ids":
-                        # position_ids 后面为input_mask
-                        return_ls.append(np.zeros(1))
-                    if key == "loss_mask":
-                        # labels 后面为task_ids
-                        datasets_status = np.zeros([1, len(self.task_group)])
-                        datasets_status[0, 0] += 1
-                        return_ls.append(datasets_status)  # task_ids
-                        # 如果loss_mask的长度小于5，则不进行训练
-                        if np.sum(dataset[key][idx]) < 5:
-                            flag = False
-                if flag:
-                    yield return_ls
-        else:
-            for idx in indices:
-                return_ls = []
-                for key in input_keys:
-                    return_ls.append(dataset[key][idx])
-                    if key == "position_ids":
-                        # position_ids 后面为input_mask
-                        return_ls.append(np.zeros(1))
-                    if key == "loss_mask":
-                        # labels 后面为task_ids
-                        datasets_status = np.zeros([1, len(self.task_group)])
-                        datasets_status[0, 0] += 1
-                        return_ls.append(datasets_status)  # task_ids
-                yield return_ls
-
-    def data_generator(self):
-        assert os.path.exists(self.h5_output_dir), f"{self.h5_output_dir} not exsit"
-        filenames = filter(lambda x: x.endswith("h5"), os.listdir(self.h5_output_dir))
-        filenames = sorted(filenames, key=lambda x: int(x.split("_")[0]))
-        datasets = [self._read_h5(os.path.join(self.h5_output_dir, filename)) for filename in filenames]
-        print("h5 filenames:", filenames)
-
-        def wrapper():
-            all_dev_batches = []
-            saved_task_ids = self.state.get("saved_task_ids", [])
-            current_offset = np.sum(saved_task_ids)
-            for dataset_i, dataset in enumerate(datasets):
-                indices = dataset["indices"]
-                current_dataset_size = len(indices)
-                if current_offset >= current_dataset_size:
-                    print(
-                        f"current_offset: {current_offset}, "
-                        f"skipping dataset_{dataset_i} with size:{current_dataset_size}"
-                    )
-                    current_offset -= current_dataset_size  # skip current dataset
-                    continue
-                else:
-                    print(
-                        f"current_offset: {current_offset}, "
-                        f"processing dataset_{dataset_i} with size:{current_dataset_size}"
-                    )
-
-                for batch_data in self._prepare_batch_data(dataset, indices[int(current_offset) :]):
-                    if len(all_dev_batches) < self.dp_worldsize:
-                        all_dev_batches.append(batch_data)
-                    if len(all_dev_batches) == self.dp_worldsize:
-                        yield all_dev_batches[self.dp_worldrank]
-                        all_dev_batches = []
-
-                current_offset = 0  # reset offset
-
-        return wrapper
