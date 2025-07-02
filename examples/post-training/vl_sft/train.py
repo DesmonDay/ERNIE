@@ -26,7 +26,6 @@ import numpy as np
 import paddle
 import yaml
 from omegaconf.dictconfig import DictConfig
-from omegaconf import OmegaConf
 
 from omegaconf.listconfig import ListConfig
 from paddle.distributed import fleet
@@ -43,7 +42,7 @@ from ernie.callbacks import (
     PPNeedDataCallback,
     VitTrainableCallback,
 )
-from ernie.configuration import Ernie4_5_Config, Ernie4_5_VLMoeConfig
+from ernie.configuration import Ernie4_5_VLMoeConfig
 from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreader
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
 from ernie.dataset.vl_sft_reader.data_processor import End2EndProcessor, End2EndProcessorArguments
@@ -57,7 +56,7 @@ from ernie.utils.mm_data_utils import MMSpecialTokensConfig
 from ernie.utils.seed_utils import set_seed
 
 from data_processor.image_preprocessor.image_preprocessor_adaptive import AdaptiveImageProcessor
-from data_processor.tokenizer.get_tokenizer import get_tokenizer
+from ernie.tokenizer_vl import get_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -289,6 +288,18 @@ def main():
         print('data_processor_args:\n', i, x)
 
     tokenizer = get_tokenizer(args)
+
+    # tokenizer = Ernie4_5_VLTokenizer.from_pretrained(
+    #         args.model_name_or_path,
+    #         model_max_length=args.max_seq_length,
+    #         padding_side="right",
+    #         use_fast=False,
+    #     )
+    # tokenizer.ignored_index = -100
+    # if tokenizer.pad_token is None:
+    #     tokenizer.pad_token = tokenizer.unk_token
+
+        
     data_processor = End2EndProcessor(data_processor_args, tokenizer, image_preprocess)  # add tokenizer by nifeng03
     data_processor.train().sft()
     logger.info(f"[DEBUG] data_processor_args: {data_processor_args}")
