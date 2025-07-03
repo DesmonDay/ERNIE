@@ -877,7 +877,7 @@ class Ernie4_5_PretrainedModel(PretrainedModel):
                     num_key_value_heads=config.num_key_value_heads,
                     head_dim=(
                         config.hidden_size // config.num_attention_heads
-                        if config.head_dim is None
+                        if getattr(config, "head_dim", None) is None
                         else config.head_dim
                     ),
                     is_quant=False,
@@ -890,7 +890,7 @@ class Ernie4_5_PretrainedModel(PretrainedModel):
                     num_key_value_heads=config.num_key_value_heads,
                     head_dim=(
                         config.hidden_size // config.num_attention_heads
-                        if config.head_dim is None
+                        if getattr(config, "head_dim", None) is None
                         else config.head_dim
                     ),
                     is_quant=False,
