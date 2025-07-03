@@ -29,7 +29,8 @@ import ujson as json
 from paddleformers.trainer import TrainerState
 from paddleformers.trainer.trainer import TRAINER_STATE_NAME
 
-from .data_utils import RandomNoReplacementSampler, contains_markup, pad_batch_data, sampling_pseudo_examples
+from .data_utils import RandomNoReplacementSampler, sampling_pseudo_examples
+from ernie.dataset.data_utils import contains_markup, pad_batch_data
 from ernie.dataset.pvp import EBMarkUpRouter
 
 logger = logging.getLogger(__name__)

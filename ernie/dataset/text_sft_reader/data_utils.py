@@ -20,11 +20,10 @@ import logging
 import random
 from collections import defaultdict, namedtuple
 
-import h5py
 import numpy as np
+from ernie.dataset.data_utils import contains_markup
 
 logger = logging.getLogger(__name__)
-DEBUG_PRINT_CNT = 0
 
 SFTExample = namedtuple(
     'SFTExample',
@@ -98,24 +97,6 @@ class RandomNoReplacementSampler:
 
     def __len__(self):
         return len(self.examples)
-
-
-def contains_markup(text, special_markups):
-    """
-    判断给定的文本是否包含指定的特殊标记。
-
-    Args:
-        text (list): 包含文本的列表。
-        special_markups (list): 包含特殊标记的列表。
-
-    Returns:
-        bool: 如果文本包含特殊标记，则返回 True；否则返回 False。
-
-    """
-    for sp_token in special_markups:
-        if sp_token in "".join(text):
-            return True
-    return False
 
 
 def convert_pseudo_example_list_to_example_only_opt_kb(
@@ -547,56 +528,3 @@ def sampling_pseudo_examples(
 
         if not (example.is_q2code == 1 or example.math_is_end == 0):
             total_len_wo_k += len_wo_k  # 更新当前样本长度
-
-
-int_type = "int64"
-
-
-def pad_batch_data(
-    insts,
-    pad_idx=0,
-    return_pos=False,
-    max_seq_len=None,
-    return_input_mask=False,
-    return_max_len=False,
-    return_num_token=False,
-    return_seq_lens=False,
-):
-    """
-    Pad the instances to the max sequence length in batch, and generate the
-    corresponding position data and attention bias.
-    """
-    return_list = []
-    max_len = max_seq_len if max_seq_len is not None else max(len(inst) for inst in insts)
-    # Any token included in dict can be used to pad, since the paddings' loss
-    # will be masked out by weights and make no effect on parameter gradients.
-
-    inst_data = np.array([inst + list([pad_idx] * (max_len - len(inst))) for inst in insts])
-    return_list += [inst_data.astype(int_type).reshape([-1, max_len])]
-
-    # position data
-    if return_pos:
-        inst_pos = np.array([list(range(0, len(inst))) + [pad_idx] * (max_len - len(inst)) for inst in insts])
-
-        return_list += [inst_pos.astype(int_type).reshape([-1, max_len])]
-
-    if return_input_mask:
-        # This is used to avoid attention on paddings.
-        input_mask_data = np.array([[1] * len(inst) + [0] * (max_len - len(inst)) for inst in insts])
-        input_mask_data = np.expand_dims(input_mask_data, axis=-1)
-        return_list += [input_mask_data.astype("float32")]
-
-    if return_max_len:
-        return_list += [max_len]
-
-    if return_num_token:
-        num_token = 0
-        for inst in insts:
-            num_token += len(inst)
-        return_list += [num_token]
-
-    if return_seq_lens:
-        seq_lens = np.array([len(inst) for inst in insts])
-        return_list += [seq_lens.astype(int_type).reshape([-1, 1])]
-
-    return return_list if len(return_list) > 1 else return_list[0]

@@ -21,28 +21,8 @@ from paddle.io import IterableDataset
 
 from .finetuning import KnowledgeBasedSFTReader
 
-IDTYPES_2_ID = {"text": 0, "image": 1, "video": 2, "audio": 3}
-IMAGETYPES_2_ID = {"image": 0, "video": 1, "padded_image": 2}
+
 DATATYPE_2_ID = {"mm": 0, "lm": 1, "audio": 2}
-
-
-def erniebot_reader(data_path):
-    """
-    读取指定路径下的JSON格式文件，并逐行返回解析后的JSON对象。
-
-    Args:
-        data_path (str): JSON文件的路径。
-
-    Yields:
-        dict: 逐行解析的JSON对象。
-
-    Raises:
-        FileNotFoundError: 如果指定的文件路径不存在，则抛出此异常。
-        json.JSONDecodeError: 如果文件内容不是有效的JSON格式，则抛出此异常。
-    """
-    with open(data_path, "r", encoding="utf-8") as fp:
-        for line in fp:
-            yield json.loads(line.strip())
 
 
 def create_pyreader(config_dataset):

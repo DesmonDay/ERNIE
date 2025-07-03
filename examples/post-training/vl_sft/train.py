@@ -26,7 +26,6 @@ import numpy as np
 import paddle
 import yaml
 from omegaconf.dictconfig import DictConfig
-from omegaconf import OmegaConf
 
 from omegaconf.listconfig import ListConfig
 from paddle.distributed import fleet
@@ -44,7 +43,7 @@ from ernie.callbacks import (
     PPNeedDataCallback,
     VitTrainableCallback,
 )
-from ernie.configuration import Ernie4_5_VLMoeConfig
+from ernie.configuration import Ernie4_5_Config, Ernie4_5_VLMoeConfig
 
 from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreader
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
@@ -69,7 +68,8 @@ logger = logging.getLogger(__name__)
 class ChatSFTArguments(PreTrainingArguments):
     """Chat SFT Arguments"""
 
-    data_filelist: str = field(default=None, metadata={"help": "sft vl data config"})
+    train_dataset_path: str = field(default=None, metadata={"help": "sft vl data path"})
+    train_dataset_prob: str = field(default=None, metadata={"help": "sft vl data prob"})
     random_seed: int = field(default=42, metadata={"help": "random seed"})
 
     text_sft_task_config: str = field(default=None, metadata={"help": "text sft data config"})
@@ -140,6 +140,34 @@ class ChatSFTArguments(PreTrainingArguments):
     resume_from_ptx_model: Optional[bool] = field(
         default=True, metadata={"help": "load pretrained weights from ptx_upload_dir"}
     )
+
+    model_config: str = field(default=None, metadata={"help": "model config"})
+
+
+def update_model_config_from_args(config: Ernie4_5_Config, model_args: dict):
+    """update model config from args
+
+    Args:
+        config (ErnieConfig): _description_
+        model_args (dict): _description_
+
+    Returns:
+        _type_: _description_
+    """
+    if "vision_config" in model_args:
+        for k, v in model_args.pop("vision_config").items():
+            if hasattr(config, "vision_config") and hasattr(config.vision_config, k):
+                logger.info(f"update vision config: {k} = {v}")
+                setattr(config.vision_config, k, v)
+            else:
+                logger.warning(f"vision_config key: {k} does not exist")
+    for k, v in model_args.items():
+        if hasattr(config, k):
+            logger.info(f"update model config: {k} = {v}")
+            setattr(config, k, v)
+        else:
+            logger.warning(f"model config key: {k} does not exist")
+    return config
 
 
 def get_tp_split_ckpt(args, path):
@@ -511,7 +539,10 @@ def main():
         cfg.vision_config.patch_size**2 * 1, -1
     )
 
-    cfg.vision_config.attn_sep = True
+    if args.model_config is not None:
+        with open(args.model_config, "r") as f:
+            model_config = json.load(f)
+        cfg = update_model_config_from_args(cfg, model_config)
     cfg.use_flash_attn = args.use_flash_attn
     cfg.use_mem_eff_attn = args.use_mem_eff_attn
     cfg.use_flash_attn_with_mask = args.use_flash_attn_with_mask
@@ -599,7 +630,8 @@ def main():
         if args.need_data:
             if args.multimodal:
                 train_dataset = SFTMultimodalDatasetJson(
-                    dataset_config=args.data_filelist,
+                    train_dataset_path=args.train_dataset_path,
+                    train_dataset_prob=args.train_dataset_prob,
                     tokenizer=tokenizer,
                     image_preprocess=image_preprocess,
                     seed=args.random_seed,
