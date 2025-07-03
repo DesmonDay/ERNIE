@@ -18,16 +18,16 @@ import logging
 import os
 import random
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict
 from functools import partial
 from typing import Optional
 
 import numpy as np
 import paddle
-import yaml
 from omegaconf.dictconfig import DictConfig
-
 from omegaconf.listconfig import ListConfig
+from typing import List, Dict, Optional
+
 from paddle.distributed import fleet
 from paddleformers.datasets import IterDataset
 from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
@@ -43,7 +43,7 @@ from ernie.callbacks import (
     PPNeedDataCallback,
     VitTrainableCallback,
 )
-from ernie.configuration import Ernie4_5_Config, Ernie4_5_VLMoeConfig
+from ernie.configuration import Ernie4_5_VLMoeConfig
 
 from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreader
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
@@ -141,10 +141,121 @@ class ChatSFTArguments(PreTrainingArguments):
         default=True, metadata={"help": "load pretrained weights from ptx_upload_dir"}
     )
 
-    model_config: str = field(default=None, metadata={"help": "model config"})
+
+@dataclass
+class VisionArguments:
+    attn_implementation: str = field(default="eager", metadata={"help": "Attention implementation"})
+    attn_sep: bool = field(default=True, metadata={"help": "Whether to separate attention"})
+    depth: int = field(default=32, metadata={"help": "Depth of the vision model"})
+    embed_dim: int = field(default=1280, metadata={"help": "Embedding dimension"})
+    hidden_act: str = field(default="quick_gelu", metadata={"help": "Hidden activation function"})
+    hidden_size: int = field(default=1280, metadata={"help": "Hidden size"})
+    in_channels: int = field(default=3, metadata={"help": "Input channels"})
+    in_chans: int = field(default=3, metadata={"help": "Input channels (alias)"})
+    mlp_ratio: int = field(default=4, metadata={"help": "MLP ratio"})
+    model_type: str = field(default="DFNRope_vision_transformer", metadata={"help": "Vision model type"})
+    num_heads: int = field(default=16, metadata={"help": "Number of attention heads"})
+    patch_size: int = field(default=14, metadata={"help": "Patch size"})
+    spatial_merge_size: int = field(default=2, metadata={"help": "Spatial merge size"})
+    spatial_patch_size: int = field(default=14, metadata={"help": "Spatial patch size"})
+    temporal_patch_size: int = field(default=2, metadata={"help": "Temporal patch size"})
+    tensor_parallel_degree: int = field(default=4, metadata={"help": "Tensor parallel degree"})
+    use_recompute: bool = field(default=True, metadata={"help": "Whether to use recompute"})
+    vit_num_recompute_layers: int = field(default=10000, metadata={"help": "Number of recompute layers"})
 
 
-def update_model_config_from_args(config: Ernie4_5_Config, model_args: dict):
+@dataclass
+class ModelArguments:
+    add_tail_layers: bool = field(default=False, metadata={"help": "Whether to add tail layers"})
+    attention_probs_dropout_prob: float = field(default=0.0, metadata={"help": "Attention probability dropout rate"})
+    bos_token_id: int = field(default=0, metadata={"help": "Beginning of sentence token ID"})
+    cachekv_quant: bool = field(default=False, metadata={"help": "Whether to quantize cache key/value"})
+    compression_ratio: float = field(default=1.0, metadata={"help": "Compression ratio"})
+    dpo_config: Optional[Dict] = field(default=None, metadata={"help": "DPO configuration"})
+    enable_delay_scale_loss: bool = field(default=True, metadata={"help": "Whether to enable delay scale loss"})
+    eos_token_id: int = field(default=1, metadata={"help": "End of sentence token ID"})
+    freq_allocation: int = field(default=20, metadata={"help": "Frequency allocation"})
+    fuse_gate_detach_matmul: bool = field(default=True, metadata={"help": "Whether to fuse gate detach matmul"})
+    fuse_linear: bool = field(default=True, metadata={"help": "Whether to fuse linear layers"})
+    fuse_ln: bool = field(default=False, metadata={"help": "Whether to fuse layer normalization"})
+    fuse_rms_norm: bool = field(default=False, metadata={"help": "Whether to fuse RMS normalization"})
+    fuse_rope: bool = field(default=False, metadata={"help": "Whether to fuse RoPE"})
+    fuse_softmax_mask: bool = field(default=False, metadata={"help": "Whether to fuse softmax mask"})
+    fuse_swiglu: bool = field(default=True, metadata={"help": "Whether to fuse SwiGLU"})
+    global_aux_loss: bool = field(default=False, metadata={"help": "Whether to use global auxiliary loss"})
+    head_dim: Optional[int] = field(default=None, metadata={"help": "Head dimension"})
+    hidden_act: str = field(default="silu", metadata={"help": "Hidden activation function"})
+    hidden_size: int = field(default=2560, metadata={"help": "Hidden size"})
+    ignored_index: int = field(default=-100, metadata={"help": "Ignored index"})
+    initializer_range: float = field(default=0.011410316056095904, metadata={"help": "Initializer range"})
+    intermediate_size: int = field(default=12288, metadata={"help": "Intermediate size"})
+    max_position_embeddings: int = field(default=4096, metadata={"help": "Maximum position embeddings"})
+    micro_batch_size: int = field(default=-1, metadata={"help": "Micro batch size"})
+    mm_vocab_size: int = field(default=0, metadata={"help": "Multimodal vocabulary size"})
+    modality_detach: bool = field(default=False, metadata={"help": "Whether to detach modalities"})
+    model_type: str = field(default="ernie4_5_moe_vl", metadata={"help": "Model type"})
+    moe_all_to_all_dropout: float = field(default=0.0, metadata={"help": "MoE all-to-all dropout rate"})
+    moe_aux_loss_lambda: float = field(default=0.0, metadata={"help": "MoE auxiliary loss lambda"})
+    moe_capacity: List[int] = field(default_factory=lambda: [128, 128, 128], metadata={"help": "MoE capacity"})
+    moe_dense_experts_token_type_id: int = field(default=3, metadata={"help": "MoE dense experts token type ID"})
+    moe_fuse_experts: bool = field(default=False, metadata={"help": "Whether to fuse MoE experts"})
+    moe_gate: str = field(default="top2_fused", metadata={"help": "MoE gate type"})
+    moe_gate_act: str = field(default="softmax", metadata={"help": "MoE gate activation"})
+    moe_group_experts: bool = field(default=False, metadata={"help": "Whether to group MoE experts"})
+    moe_group_orthogonal_loss: bool = field(default=True, metadata={"help": "Whether to use MoE group orthogonal loss"})
+    moe_intermediate_size: List[int] = field(default_factory=lambda: [1536, 512], metadata={"help": "MoE intermediate sizes"})
+    moe_k: int = field(default=6, metadata={"help": "MoE top-k value"})
+    moe_layer_end_index: List[int] = field(default_factory=lambda: [29, 28], metadata={"help": "MoE layer end indices"})
+    moe_layer_feed_fake_token: bool = field(default=False, metadata={"help": "Whether MoE layers feed fake tokens"})
+    moe_layer_interval: int = field(default=1, metadata={"help": "MoE layer interval"})
+    moe_layer_start_index: List[int] = field(default_factory=lambda: [1, 1], metadata={"help": "MoE layer start indices"})
+    moe_multimodal_dispatch_use_allgather: str = field(default="v2-alltoall-unpad-text", metadata={"help": "MoE multimodal dispatch method"})
+    moe_norm_gate_logits: bool = field(default=True, metadata={"help": "Whether to normalize MoE gate logits"})
+    moe_num_experts: List[int] = field(default_factory=lambda: [64, 64], metadata={"help": "Number of MoE experts"})
+    moe_num_shared_experts: int = field(default=2, metadata={"help": "Number of shared MoE experts"})
+    moe_orthogonal_loss_lambda: float = field(default=0.0, metadata={"help": "MoE orthogonal loss lambda"})
+    moe_reverse_token_drop: bool = field(default=False, metadata={"help": "Whether to reverse MoE token drop"})
+    moe_use_aux_free: bool = field(default=True, metadata={"help": "Whether MoE uses auxiliary free"})
+    moe_use_hard_gate: bool = field(default=True, metadata={"help": "Whether MoE uses hard gate"})
+    moe_use_size_all2all: bool = field(default=False, metadata={"help": "Whether MoE uses size all-to-all"})
+    moe_use_token_type_bias: bool = field(default=False, metadata={"help": "Whether MoE uses token type bias"})
+    moe_z_loss_lambda: float = field(default=0.0, metadata={"help": "MoE z loss lambda"})
+    multi_token_pred_lambda: float = field(default=0.3, metadata={"help": "Multi-token prediction lambda"})
+    num_acc_steps: int = field(default=4, metadata={"help": "Number of accumulation steps"})
+    num_attention_heads: int = field(default=20, metadata={"help": "Number of attention heads"})
+    num_hidden_layers: int = field(default=28, metadata={"help": "Number of hidden layers"})
+    num_key_value_heads: int = field(default=4, metadata={"help": "Number of key/value heads"})
+    num_nextn_predict_layers: int = field(default=0, metadata={"help": "Number of next-n prediction layers"})
+    paddleformers_version: Optional[str] = field(default=None, metadata={"help": "PaddleFormers version"})
+    pp_seg_method: str = field(default="layer:Ernie4_5_DecoderLayer|EmptyLayer", metadata={"help": "Pipeline parallel segmentation method"})
+    recompute_granularity: str = field(default="core_attn", metadata={"help": "Recompute granularity"})
+    resampler_fuse_rms_norm: bool = field(default=False, metadata={"help": "Whether to fuse RMS norm in resampler"})
+    rms_norm_eps: float = field(default=1e-05, metadata={"help": "RMS normalization epsilon"})
+    rope_theta: int = field(default=500000, metadata={"help": "RoPE theta value"})
+    sinkhorn_2gate: bool = field(default=True, metadata={"help": "Whether to use Sinkhorn 2-gate"})
+    sinkhorn_temp: float = field(default=0.03, metadata={"help": "Sinkhorn temperature"})
+    skip_recompute_ops: Dict = field(default_factory=dict, metadata={"help": "Skip recompute operations"})
+    temporal_conv_size: int = field(default=2, metadata={"help": "Temporal convolution size"})
+    tie_word_embeddings: bool = field(default=True, metadata={"help": "Whether to tie word embeddings"})
+    use_bias: bool = field(default=False, metadata={"help": "Whether to use bias"})
+    use_flash_attention: bool = field(default=True, metadata={"help": "Whether to use flash attention"})
+    use_fused_head_and_loss_fn: bool = field(default=False, metadata={"help": "Whether to use fused head and loss function"})
+    use_recompute_lm_head: bool = field(default=False, metadata={"help": "Whether to recompute LM head"})
+    use_recompute_loss_fn: bool = field(default=True, metadata={"help": "Whether to recompute loss function"})
+    use_recompute_moe: bool = field(default=False, metadata={"help": "Whether to recompute MoE"})
+    use_recompute_mtp: bool = field(default=False, metadata={"help": "Whether to recompute MTP"})
+    use_recompute_resampler: bool = field(default=False, metadata={"help": "Whether to recompute resampler"})
+    use_rmsnorm: bool = field(default=True, metadata={"help": "Whether to use RMS normalization"})
+    use_sparse_flash_attn: bool = field(default=True, metadata={"help": "Whether to use sparse flash attention"})
+    use_sparse_head_and_loss_fn: bool = field(default=False, metadata={"help": "Whether to use sparse head and loss function"})
+    use_temporal_conv: bool = field(default=True, metadata={"help": "Whether to use temporal convolution"})
+    use_var_len_flash_attn: bool = field(default=False, metadata={"help": "Whether to use variable length flash attention"})
+    vision_config: VisionArguments = field(default_factory=VisionArguments, metadata={"help": "Vision configuration"})
+    vocab_size: int = field(default=103424, metadata={"help": "Vocabulary size"})
+    weight_share_add_bias: bool = field(default=True, metadata={"help": "Whether to share weight and add bias"})
+
+
+def update_model_config_from_args(config: Ernie4_5_VLMoeConfig, model_args: dict):
     """update model config from args
 
     Args:
@@ -157,13 +268,11 @@ def update_model_config_from_args(config: Ernie4_5_Config, model_args: dict):
     if "vision_config" in model_args:
         for k, v in model_args.pop("vision_config").items():
             if hasattr(config, "vision_config") and hasattr(config.vision_config, k):
-                logger.info(f"update vision config: {k} = {v}")
                 setattr(config.vision_config, k, v)
             else:
                 logger.warning(f"vision_config key: {k} does not exist")
     for k, v in model_args.items():
         if hasattr(config, k):
-            logger.info(f"update model config: {k} = {v}")
             setattr(config, k, v)
         else:
             logger.warning(f"model config key: {k} does not exist")
@@ -239,9 +348,10 @@ def main():
     main function
     """
 
-    parser = PdArgumentParser((ChatSFTArguments, *End2EndProcessorArguments))
+    parser = PdArgumentParser((ChatSFTArguments, ModelArguments, *End2EndProcessorArguments))
     args = parser.parse_args_into_dataclasses()
-    data_processor_args = args[1:]
+    data_processor_args = args[2:]
+    model_config = asdict(args[1])
     args = args[0]
 
     # create output dir
@@ -539,10 +649,7 @@ def main():
         cfg.vision_config.patch_size**2 * 1, -1
     )
 
-    if args.model_config is not None:
-        with open(args.model_config, "r") as f:
-            model_config = json.load(f)
-        cfg = update_model_config_from_args(cfg, model_config)
+    cfg = update_model_config_from_args(cfg, model_config)
     cfg.use_flash_attn = args.use_flash_attn
     cfg.use_mem_eff_attn = args.use_mem_eff_attn
     cfg.use_flash_attn_with_mask = args.use_flash_attn_with_mask

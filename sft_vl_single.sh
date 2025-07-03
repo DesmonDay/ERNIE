@@ -83,5 +83,4 @@ nohup sh examples/post-training/vl_sft/script/train_gpu_single.sh \
 --skip_profile_timer 0 \
 --save_sharding_stage1_model_include_freeze_params true \
 --disable_pipeline_warmup true \
---model_config /root/paddlejob/workspace/env_run/output/wenxinhao/github/ERNIE/examples/post-training/vl_sft/config/model_config.json \
 > lite_erniekits_1step.log 2>err.log &

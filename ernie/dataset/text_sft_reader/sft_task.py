@@ -14,8 +14,6 @@
 
 """This module provides readers that read data from files."""
 
-import json
-
 import numpy as np
 from paddle.io import IterableDataset
 
