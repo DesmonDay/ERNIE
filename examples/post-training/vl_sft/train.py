@@ -26,12 +26,12 @@ import numpy as np
 import paddle
 import yaml
 from omegaconf.dictconfig import DictConfig
-from omegaconf import OmegaConf
 
 from omegaconf.listconfig import ListConfig
 from paddle.distributed import fleet
 from paddleformers.datasets import IterDataset
 from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
+from paddleformers.utils.log import logger
 from paddleformers.utils.tools import get_env_device
 from pretraining_trainer import PreTrainingArguments
 from trainer import SFTTrainer
@@ -45,7 +45,6 @@ from ernie.callbacks import (
     VitTrainableCallback,
 )
 from ernie.configuration import Ernie4_5_VLMoeConfig
-
 from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreader
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
 from ernie.dataset.vl_sft_reader.data_utils import merge_fn_group_batch
@@ -59,9 +58,6 @@ from ernie.utils.seed_utils import set_seed
 
 from data_processor.steps.end2end_processing import End2EndProcessor, End2EndProcessorArguments
 from data_processor.image_preprocessor.image_preprocessor_adaptive import AdaptiveImageProcessor
-from data_processor.tokenizer.get_tokenizer import get_tokenizer
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
