@@ -50,10 +50,9 @@ from ernie.dataset.text_sft_reader.sft_task import KnoverDataset, create_pyreade
 from ernie.dataset.vl_sft_reader import MixExampleSetJson, SFTMultimodalDatasetJson
 from ernie.dataset.vl_sft_reader.data_utils import merge_fn_group_batch
 
-from ernie.dfnrope import DFNRopeVisionTransformerConfig
 from ernie.modeling_moe_vl import Ernie4_5_VLMoeForConditionalGeneration
-
-from ernie.modeling_moe_vl_pp import DFNRopeVisionTransformerPipe, ErnieMoEVLForCausalLMPipe
+from ernie.tokenizer_vl import Ernie4_5_VLTokenizer
+from ernie.modeling_moe_vl_pp import Ernie4_5_VLMoeForConditionalGenerationPipe
 from ernie.utils.misc import global_training_logs
 from ernie.utils.mm_data_utils import MMSpecialTokensConfig
 from ernie.utils.seed_utils import set_seed
@@ -142,20 +141,6 @@ class ChatSFTArguments(PreTrainingArguments):
     )
 
 
-def get_tp_split_ckpt(args, path):
-    """
-    get_tp_split_ckpt
-    """
-    tp_degree = args.tensor_parallel_degree
-    tp_rank = max(args.tensor_parallel_rank, 0)
-
-    if tp_degree > 1:
-        ckpt_path = os.path.join(path, f"tp{tp_degree:02d}", f"model_state.tp{tp_rank:02d}.pdparams")
-    else:
-        ckpt_path = os.path.join(path, "model_state.pdparams")
-    return ckpt_path
-
-
 def get_resume_checkpoint_path(config):
     """
     get resume checkpoint path from mpirun env
@@ -188,22 +173,6 @@ def get_resume_checkpoint_path(config):
         user_defined_resume_from_checkpoint = getattr(config, "resume_from_checkpoint", None)
         logger.info(f"user has defined resume_from_checkpoint: {user_defined_resume_from_checkpoint}")
         return user_defined_resume_from_checkpoint
-
-
-def inject_pp_vision_model(args, cfg):
-    """_summary_
-
-    Args:
-        args (_type_): _description_
-        cfg (_type_): _description_
-
-    Returns:
-        _type_: _description_
-    """
-    vision_model = DFNRopeVisionTransformerPipe.from_pretrained(
-        os.path.join(args.model_name_or_path, "DFNRopeVisionTransformer"), config=cfg
-    )
-    return vision_model
 
 
 def main():
@@ -289,13 +258,11 @@ def main():
         args.same_data = True
     logger.info(f"setting same_data: {args.same_data}")
 
-    image_preprocess = AdaptiveImageProcessor.from_pretrained(
-        os.path.join(args.model_name_or_path, "DFNRopeVisionTransformer")
-    )
+    image_preprocess = AdaptiveImageProcessor.from_pretrained(args.model_name_or_path)
     for i, x in enumerate(data_processor_args):
         print('data_processor_args:\n', i, x)
 
-    tokenizer = get_tokenizer(args)
+    tokenizer = Ernie4_5_VLTokenizer.from_pretrained(args.model_name_or_path)
     data_processor = End2EndProcessor(data_processor_args, tokenizer, image_preprocess)  # add tokenizer by nifeng03
     data_processor.train().sft()
     logger.info(f"[DEBUG] data_processor_args: {data_processor_args}")
@@ -457,9 +424,7 @@ def main():
         logger.info(f"disable moe flag when using moe-group={args.moe_group}")
         args.use_moe = False
 
-    cfg = Ernie4_5_VLMoeConfig.from_pretrained(
-        os.path.join(args.model_name_or_path),
-    )
+    cfg = Ernie4_5_VLMoeConfig.from_pretrained(os.path.join(args.model_name_or_path))
     cfg.use_cache = False
     cfg.max_sequence_length = args.max_seq_length
     cfg.seqlen = args.max_seq_length
@@ -479,24 +444,13 @@ def main():
         cfg.tensor_parallel_degree = 1
         cfg.tensor_parallel_rank = 0
 
-    image_preprocess = None  # set if `vision_model_name_or_path is not None`
-    logger.info("USE DFN")
-    vision_config = DFNRopeVisionTransformerConfig.from_pretrained(
-        os.path.join(args.model_name_or_path, "DFNRopeVisionTransformer"),
-        tensor_parallel_degree=cfg.tensor_parallel_degree,
-        tensor_parallel_rank=cfg.tensor_parallel_rank,
-    )
-    cfg.vision_config = vision_config
+    cfg.vision_config.tensor_parallel_degree = cfg.tensor_parallel_degree
+    cfg.vision_config.tensor_parallel_rank = cfg.tensor_parallel_rank
     cfg.pixel_hidden_size = cfg.vision_config.hidden_size
     cfg.im_patch_id = tokenizer.get_vocab()[MMSpecialTokensConfig.get_special_tokens_info()["image_placeholder"]]
     cfg.max_text_id = cfg.im_patch_id
 
-    # image_preprocess = self.processor.image_preprocessor
-    # image_preprocess = processor.image_preprocessor
-    image_preprocess = AdaptiveImageProcessor.from_pretrained(
-        os.path.join(args.model_name_or_path, "DFNRopeVisionTransformer")
-    )  #
-
+    image_preprocess = AdaptiveImageProcessor.from_pretrained(args.model_name_or_path)
     image_preprocess.image_mean_tensor = paddle.to_tensor(image_preprocess.image_mean, dtype="float32").reshape(
         [1, 3, 1, 1]
     )
@@ -511,7 +465,8 @@ def main():
         cfg.vision_config.patch_size**2 * 1, -1
     )
 
-    cfg.vision_config.attn_sep = True
+    cfg.vision_config.attn_sep = False
+    cfg.use_recompute_loss_fn = True
     cfg.use_flash_attn = args.use_flash_attn
     cfg.use_mem_eff_attn = args.use_mem_eff_attn
     cfg.use_flash_attn_with_mask = args.use_flash_attn_with_mask
@@ -519,8 +474,6 @@ def main():
     cfg.moe_dropout_prob = args.moe_dropout_prob
     cfg.token_balance_loss = args.token_balance_loss
     cfg.token_balance_seqlen = args.max_seq_length * args.per_device_train_batch_size
-    vision_model = None
-    vision_model = inject_pp_vision_model(args, cfg)
 
     if args.pipeline_parallel_degree > 1:  # pp
         print(f"[sft-debug]: virtual_pp_degree={args.virtual_pp_degree}")
@@ -538,16 +491,15 @@ def main():
             assert args.pp_need_data, "balanced image preprocess must use with pp_need_data"
 
         if args.from_scratch:
-            model = ErnieMoEVLForCausalLMPipe(cfg)
+            model = Ernie4_5_VLMoeForConditionalGenerationPipe(cfg)
 
         else:
-            model = ErnieMoEVLForCausalLMPipe.from_pretrained(
+            model = Ernie4_5_VLMoeForConditionalGenerationPipe.from_pretrained(
                 args.model_name_or_path,
                 config=cfg,
             )
         if args.pp_need_data_degree:
             model.set_pp_need_data_degree(args.pp_need_data_degree)
-            # assert image_preprocess is not None
     else:
         if args.from_scratch:
             model = Ernie4_5_VLMoeForConditionalGeneration(cfg)
@@ -556,12 +508,10 @@ def main():
                 args.model_name_or_path,
                 config=cfg,
             )
-        logger.info(f"vision_model: {vision_model}")
+    logger.info(f"vision_model: {model.vision_model}")
 
     if image_preprocess is not None and hasattr(model, "add_image_preprocess"):
         model.add_image_preprocess(image_preprocess)
-    if vision_model is not None and hasattr(model, "add_vision_model"):
-        model.add_vision_model(vision_model)
 
     cfg = model.config
     logger.info(f"using model type:{type(model)}")
@@ -583,7 +533,6 @@ def main():
     logger.info(f"args.need_data: {args.need_data}")
 
     if args.do_train:
-
         hcg = fleet.get_hybrid_communicate_group()
         dp_rank = hcg.get_data_parallel_rank()
         dp_size = hcg.get_data_parallel_world_size()
@@ -752,7 +701,6 @@ def main():
         args.pipeline_parallel_degree > 1
         and "freeze_vision" not in freeze_config
         and args.multimodal
-        and vision_model is not None
     ):
         # train VIT
         vit_trainable_callback = VitTrainableCallback(args, model)

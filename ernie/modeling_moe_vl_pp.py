@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-""" ErnieMoEVLForCausalLMPipe """
+""" Ernie4_5_VLMoeForConditionalGenerationPipe """
 
 import contextlib
 import functools
@@ -42,10 +42,18 @@ from paddle.distributed.fleet.layers.mpu.mp_layers import (
 )
 from paddle.distributed.fleet.layers.mpu.random import get_rng_state_tracker
 from paddle.distributed.fleet.meta_parallel import LayerDesc, PipelineLayer, SharedLayerDesc
+try:
+    from paddle.distributed.fleet.meta_parallel import LocalSharedLayerDesc
+except:
+    LocalSharedLayerDesc = None
 from paddle.distributed.fleet.utils import recompute
 from paddle.nn import functional as F
 from paddle.utils.layers_utils import flatten, map_structure, pack_sequence_as
-from paddleformers.transformers.model_utils import PretrainedModel
+from paddleformers.transformers.model_utils import (
+    PretrainedModel,
+    PipelinePretrainedModel as PipelinePretrainedModelBase,
+)
+from paddleformers.utils.log import logger
 
 from .comm_utils import (
     all_gather_varlen,
@@ -53,10 +61,8 @@ from .comm_utils import (
     mp_slice,
 )
 from .configuration import Ernie4_5_MoeConfig, Ernie4_5_VLMoeConfig
-from .dfnrope.modeling import (
-    DFNRopeVisionTransformerConfig,
-    DFNRopeVisionTransformerPretrainedModel,
-)
+from .dfnrope.modeling import DFNRopeVisionTransformerConfig
+from .dfnrope.modeling_pp import DFNRopeVisionTransformerPipe
 from .distributed import ColumnSequenceParallelLinear, RowSequenceParallelLinear
 from .modeling import Ernie4_5_MLP, LayerNorm, RMSNorm
 from .modeling_moe import Ernie4_5_DecoderLayer as ErnieMoEDecoderLayer
@@ -82,9 +88,7 @@ from .moe.moe_all_gather_layer import MOEAllGatherLayerV2
 from .moe.moe_layer import MOELayer
 from .moe.topk_gate import TopKGate
 from .sequence_parallel_utils import (
-    AllGatherVarlenOpV2,
     ScatterOp,
-    SliceVarlenOp,
     mark_as_sequence_parallel_parameter,
 )
 
@@ -93,100 +97,17 @@ try:
 except ModuleNotFoundError:
     global_training_logs = {}
 
-logger = logging.getLogger(__name__)
 
-
-def moe_statedict_cherry_pick(state_dict: Dict[str, paddle.Tensor], config: Ernie4_5_MoeConfig):
-    """
-    pick pamater from state_dict
-    """
-    moe_num_experts = (
-        sum(config.moe_num_experts) if isinstance(config.moe_num_experts, (list, tuple)) else config.moe_num_experts
-    )
-    if moe_num_experts <= 1:
-        return state_dict
-    moe_world_size = config.moe_world_size
-    if moe_world_size <= 1:
-        moe_world_size = 1
-    moe_world_size_per_device = moe_num_experts // moe_world_size
-    for key in list(state_dict.keys()):
-        if "mlp.experts" in key:
-            imoe = int(re.search(r"mlp\.experts\.(\d+)", key).group(1))
-            maybe_moe_name = key.replace(
-                f"mlp.experts.{imoe}", f"mlp.experts.{config.moe_rank * moe_world_size_per_device + imoe}"
-            )
-            if maybe_moe_name != key and maybe_moe_name in state_dict:
-                logger.info(f"moe auto changed state-dict using {maybe_moe_name} as {key}")
-                state_dict[key] = state_dict.pop(maybe_moe_name)
-    return state_dict
-
-
-class PipelinePretrainedModel(PretrainedModel):
-    """_summary_
-
-    Args:
-        PretrainedModel (_type_): _description_
-    """
-
-    def __init__(self, config, *args, **kwargs):  # no call
-        self.config = config
-        super().__init__(config, *args, **kwargs)
-
-    def init(self, config, *args, **kwargs):  # no call
-        """Add a single layer to the sequential module."""
-        self._sequential_layers = []
-        self._pipeline_name_mapping = None
-        self._pp_to_single_mapping = None
-
-    def add_sequential_layer(self, layer_desc, name_prefix=""):
-        """addd a single layer to the sequential module."""
-        self._sequential_layers.append({"layer": layer_desc, "name_prefix": name_prefix})
-
-    def get_sequential_layers(self):
-        """get_sequential_layers"""
-        return [x["layer"] for x in self._sequential_layers]
-
-    def get_sequential_name_prefixs(self):
-        """get sequential_name_prefix"""
-        return {str(index): x["name_prefix"] for index, x in enumerate(self._sequential_layers)}
-
-    def get_shardlayer_prefix(self, name_splited):
-        """_summary_
-            This function retrieves the prefix of a shared layer. The process involves:
-            1. Identifying all key names of shared layers, like 'shared_weight01', 'shared_weight02', etc.
-            2. For instance, given name_splited = ['shared_layers', 'shared_weight01', 'weight'],
-                the 'shared_layer_key' would be name_splited[1], which is 'shared_weight01'.
-            3. By traversing through all layers, the function checks if the specified
-                shared_layer is present in the current stage. If found, it returns the corresponding prefix.
-
-            Note: For retrieving all SharedLayer instances in Paddle, you can refer to the following Paddle code.
-            https://github.com/PaddlePaddle/Paddle/blob/2cf724d055679a1a0e48766dfb1708b920273078/python/paddle/distributed/fleet/meta_parallel/parallel_layers/pp_layers.py#L460-L513
-        Args:
-            name_splited (_type_): _description_
-
-        Returns:
-            _type_: _description_
-        """
-        shared_layer_names = {s.layer_name for s in self._layers_desc if isinstance(s, SharedLayerDesc)}
-        assert name_splited[1] in shared_layer_names, f"The shared layer name {name_splited[1]} must be in prefixes!"
-        shared_layer_key = name_splited[1]
-        for idx, layer in enumerate(self._layers_desc):
-            if isinstance(layer, SharedLayerDesc) and layer.layer_name == shared_layer_key:
-                if self.get_stage_from_index(idx) == self._stage_id:
-                    return self.get_sequential_name_prefixs()[str(idx)]
-
-        # the prefix must be in the current stage, else raise error
-        raise ValueError(f"The shared layer {shared_layer_key} must be in the current stage!")
-
+class PipelinePretrainedModel(PipelinePretrainedModelBase):
+    # Rewrite pipeline name mapping
     def _set_pipeline_name_mapping(self, mappings=None):
-        """set pipeline_name_mapping"""
         if mappings is not None:
-            self._pipeline_name_mapping = mappings
+            self._single_to_pp_mapping = mappings
         else:
             single_to_pp_mapping = {}
             pp_to_single_mapping = {}
 
-            state_dict_keys = list(super().state_dict().keys())
+            state_dict_keys = list(PretrainedModel.state_dict(self).keys())
             first_key = ""
             for k in state_dict_keys:
                 if "shared_layers" not in k:
@@ -197,7 +118,7 @@ class PipelinePretrainedModel(PretrainedModel):
             # else it will be like 0.xxx
             use_virtual_pp_degree = first_key[0].isdigit() and first_key[1].isdigit()
 
-            prefixes = self.get_sequential_name_prefixs()
+            prefixes = self.get_sequential_name_prefixes()
             for k in state_dict_keys:
                 name_splited = k.split(".")
                 if use_virtual_pp_degree:
@@ -210,16 +131,16 @@ class PipelinePretrainedModel(PretrainedModel):
                             single_name = [prefixes[str(len(prefixes) - 1)]]
                             single_name.extend(name_splited[2:])
                             logger.warning(
-                                f"Please check! we treat this key as last layer, get {k}, \
-                                        set origin name as {'.'.join(single_name)}"
+                                f"Please check! we treat this key as last layer, get {k}, set origin name as {'.'.join(single_name)}"
                             )
                     elif name_splited[0] == "shared_layers":
-                        single_name = [self.get_shardlayer_prefix(name_splited)]
+                        single_name = [self.get_shardlayer_prefix(name_splited, SharedLayerDesc)]
+                        single_name.extend(name_splited[2:])
+                    elif name_splited[0] == "local_shared_layers":
+                        single_name = [self.get_shardlayer_prefix(name_splited, LocalSharedLayerDesc)]
                         single_name.extend(name_splited[2:])
                     else:
-                        single_to_pp_mapping[k] = k
-                        pp_to_single_mapping[k] = k
-                        continue
+                        single_name = name_splited
                 else:
                     idx = name_splited[0]
                     # for normal pp layer
@@ -228,149 +149,21 @@ class PipelinePretrainedModel(PretrainedModel):
                         single_name = [] if prefixes[idx] == "" else [prefixes[idx]]
                         single_name.extend(name_splited[1:])
                     elif idx == "shared_layers":
-                        single_name = [self.get_shardlayer_prefix(name_splited)]
+                        single_name = [self.get_shardlayer_prefix(name_splited, SharedLayerDesc)]
+                        single_name.extend(name_splited[2:])
+                    elif idx == "local_shared_layers":
+                        single_name = [self.get_shardlayer_prefix(name_splited, LocalSharedLayerDesc)]
                         single_name.extend(name_splited[2:])
                     else:
-                        single_to_pp_mapping[k] = k
-                        pp_to_single_mapping[k] = k
-                        continue
+                        single_name = name_splited
 
                 single_to_pp_mapping[".".join(single_name)] = k
                 pp_to_single_mapping[k] = ".".join(single_name)
 
-            self._pipeline_name_mapping = single_to_pp_mapping
+            self._single_to_pp_mapping = single_to_pp_mapping
             self._pp_to_single_mapping = pp_to_single_mapping
 
-        return self._pipeline_name_mapping
-
-    def state_dict(self, *args, **kwargs):
-        """get state_dict"""
-        state_dict = super().state_dict(*args, **kwargs)
-
-        if self._pipeline_name_mapping is None:
-            self._set_pipeline_name_mapping()
-        # assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-
-        for k in list(state_dict.keys()):
-            v = state_dict.pop(k)
-            state_dict[self._pp_to_single_mapping[k]] = v
-
-        return state_dict
-
-    def _init_weights(self, layer):
-        """Initialization hook"""
-        if self.config.tensor_parallel_degree > 1:
-            rng_tracker = get_rng_state_tracker().rng_state
-        else:
-            rng_tracker = contextlib.nullcontext
-
-        if isinstance(
-            layer,
-            (
-                ColumnParallelLinear,
-                RowParallelLinear,
-                ColumnSequenceParallelLinear,
-                RowSequenceParallelLinear,
-                VocabParallelEmbedding,
-                # TEFP8Linear,
-                Ernie4_5_MoeLMHead,
-                nn.Embedding,
-                # NativeLinear,
-                paddle.incubate.nn.FusedLinear,
-            ),
-        ):
-            # In the dygraph mode, use the `set_value` to reset the parameter directly,
-            # and reset the `state_dict` to update parameter in static mode.
-            # logger.info(f'initializing pp:{type(layer)}')
-
-            # if isinstance(layer, RoundRobinGate):
-            #     return
-
-            is_moe = getattr(layer.weight, "no_sync", False)
-            with rng_tracker("local_seed" if is_moe else "model_parallel_rng"):
-                dtype = paddle.get_default_dtype()  # layer.weight.dtype  #
-                # dtype = str(dtype).replace("paddle.", "")
-                paddle.set_default_dtype("float32")
-                # if isinstance(layer, TEFP8Linear):
-                #     layer.weight.set_value(
-                #         paddle.transpose(
-                #             paddle.randn(layer.weight.shape[::-1], dtype=dtype).scale(self.config.initializer_range),
-                #             perm=[1, 0],
-                #         )
-                #     )
-                # else:
-                layer.weight.set_value(
-                    paddle.randn(layer.weight.shape, dtype=dtype).scale(self.config.initializer_range)
-                )
-                paddle.set_default_dtype(dtype)
-                logger.info(
-                    f"dist-init-fc: shape={layer.weight.shape}, range={self.config.initializer_range}, "
-                    f"dtype={layer.weight.dtype} "
-                    f'type={type(layer)},norm={layer.weight.astype("float32").norm().item()},is_moe={is_moe}'
-                )
-
-        elif isinstance(layer, TopKGate):
-            if not hasattr(layer, "weight"):  # no weight to initialie : moe-round-robin-gate
-                return
-            with rng_tracker("model_parallel_rng"):
-                dtype = paddle.get_default_dtype()  # layer.weight.dtype  #
-                paddle.set_default_dtype("float32")
-                moe_inter = self.config.moe_intermediate_size
-                moe_num_experts = self.config.moe_num_experts
-                if isinstance(moe_inter, (list, tuple)):
-                    moe_inter = moe_inter[0]
-                if isinstance(moe_num_experts, (list, tuple)):
-                    moe_num_experts = moe_num_experts[0]
-                if self.config.moe_group_experts:
-                    layer.weight.set_value(
-                        paddle.randn(layer.weight.shape, dtype=layer.weight.dtype).scale(self.config.initializer_range)
-                    )
-                else:
-                    granularity = 1 if moe_inter == 0 else self.config.intermediate_size // moe_inter
-                    layer.weight.set_value(
-                        paddle.randn(
-                            [self.config.hidden_size, moe_num_experts // granularity],
-                            dtype="float32",
-                        )
-                        .scale(self.config.initializer_range)
-                        .repeat_interleave(granularity, axis=-1)
-                    )
-                logger.info(
-                    f"dist-init-moe_gate: shape={layer.weight.shape}, dtype={layer.weight.dtype} "
-                    f"range={self.config.initializer_range},type={type(layer)}, "
-                    f'norm={layer.weight.astype("float32").norm().item()}'
-                )
-                if isinstance(self.config.moe_num_experts, (tuple, list)):
-                    for i in range(1, len(self.config.moe_num_experts)):
-                        layer_weight = getattr(layer, f"weight_{i}")
-                        layer_weight.set_value(
-                            paddle.randn(layer_weight.shape, dtype=layer_weight.dtype).scale(
-                                self.config.initializer_range
-                            )
-                        )
-                        logger.info(
-                            f"dist-init-moe_gate: shape={layer_weight.shape}, dtype={layer_weight.dtype} "
-                            f"range={self.config.initializer_range},type={type(layer)}, "
-                            f'norm={layer_weight.astype("float32").norm().item()}'
-                        )
-                paddle.set_default_dtype(dtype)
-
-        # elif isinstance(layer, RotaryEmbedding):
-        #     head_dim = self.config.hidden_size // self.config.num_attention_heads
-        #     inv_freq = 1.0 / (layer.base ** (np.arange(0, head_dim, 2).astype("float32") / head_dim))
-        #     # self.register_buffer("inv_freq", inv_freq.cast(dtype))
-
-        #     # higher acc using float32
-        #     t = np.arange(layer.max_position_embeddings, dtype="float32")
-        #     freqs = np.einsum("i,j->ij", t, inv_freq)
-        #     # Different from paper, but it uses a different permutation in order to obtain the same calculation
-        #     emb = np.concatenate([freqs, freqs], axis=-1)
-        #     # [bs, seqlen, nhead, head_dim]
-        #     cos_cached = np.cos(emb)[:, :]  # .astype(dtype)
-        #     sin_cached = np.sin(emb)[:, :]  # .astype(dtype)
-
-        #     layer.cos_cached.set_value(cos_cached)  # model后续会被cast成half/bfloat16
-        #     layer.sin_cached.set_value(sin_cached)
+        return self._single_to_pp_mapping
 
 
 class ErniePretrainingCriterionPipe(ErniePretrainingCriterion):
@@ -804,7 +597,7 @@ def modality_detach(wrapped_class):
         bound_forward = MethodType(old_fwd, self)
         if not self.config.modality_detach:
             return bound_forward(args)
-        assert self._modality_param_mapping, f"call `ErnieMoEVLForCausalLMPipe.freeze_lm()` first, self={self}"
+        assert self._modality_param_mapping, f"call `Ernie4_5_VLMoeForConditionalGenerationPipe.freeze_lm()` first, self={self}"
 
         @contextlib.contextmanager
         def freeze_context():
@@ -885,95 +678,6 @@ class ErnieMoELMHeadPipe(Ernie4_5_MoeVLHead):
                 mm_head_bias,
             )
         return token_type_ids, logits_text, logits_image, None
-
-
-class DFNRopeVisionTransformerPipe(DFNRopeVisionTransformerPretrainedModel):
-    """
-    DFNRopeVisionTransformerPipe
-    """
-
-    def __init__(self, config, use_full_recompute=False):
-        self.sorted_thw = None
-        self.sorted_idx = None
-        self.seq_list = None
-        self.new_thw = []
-        self.pp_data_balance = getattr(config.vision_config, "pp_data_balance", False)
-        self.attn_sep = getattr(config.vision_config, "attn_sep", False)
-        self.use_full_recompute = use_full_recompute
-        if self.use_full_recompute:
-            logger.info("use full recompute, vision model will NOT use recompute inner")
-            config.vision_config.recompute = False
-        super().__init__(config.vision_config)
-        if self.config.tensor_parallel_degree > 1:
-            logger.info("use sp extract feature, vit parameter will be marked as sequence parallel")
-            for p in self.parameters():
-                mark_as_sequence_parallel_parameter(p)
-
-    def extract_feature(self, images, grid_thw, second_fwd=False):
-        """extract feature"""
-        if self.config.tensor_parallel_degree <= 1:
-            return self._extract_feature(images, grid_thw)
-        else:
-            grid_thw = grid_thw.clone()
-            # logger.info("use sp extract feature")
-            images_indices = []
-            parallelism = self.config.tensor_parallel_degree
-            capacity = (grid_thw.prod(-1).sum(-1) + parallelism - 1) // parallelism
-            crop_sizes = grid_thw.prod(-1)
-            crop_offset = crop_sizes.cumsum(0)
-            rank_per_crop = paddle.maximum((crop_offset - 1) // capacity, paddle.to_tensor(0))
-            image_size_per_rank = paddle.zeros([parallelism], dtype="int64")
-            num_crop_per_rank = paddle.bincount(rank_per_crop, minlength=parallelism)
-            image_size_per_rank = paddle.scatter(image_size_per_rank, rank_per_crop, crop_sizes, overwrite=False)
-
-            thw_indices = num_crop_per_rank
-            images_indices = image_size_per_rank
-
-            num_pad = 0
-            if self.attn_sep:
-                seqlen = images.shape[0]
-                num_pad = math.ceil(seqlen / parallelism) * parallelism - seqlen
-                images = paddle.nn.functional.pad(images, [0, num_pad, 0, 0], value=0)
-                images_indices = [images.shape[0] // parallelism for _ in range(parallelism)]
-                images = SliceVarlenOp.apply(images, images_indices)
-            else:
-                images = SliceVarlenOp.apply(images, images_indices)
-                images = images.detach()
-                grid_thw = mp_slice(grid_thw, thw_indices)
-
-            if len(images):
-                image_features = self._extract_feature(images, grid_thw, num_pad=num_pad)
-            else:
-                image_features = paddle.empty([0, self.config.hidden_size], dtype=self.patch_embed.proj.weight.dtype)
-                image_features.stop_gradient = self.patch_embed.proj.weight.stop_gradient
-            # sanity check
-            if not second_fwd:
-                image_features = AllGatherVarlenOpV2.apply(image_features, images_indices)
-                if self.attn_sep:
-                    image_features = image_features[:seqlen, :]
-            # diff = (feas-image_features).abs().mean()
-            # logger.info(f'shard vs not shard : {image_features.dtype} {image_features.stop_gradient} {diff}')
-            if second_fwd:
-                return image_features, images_indices
-            return image_features
-
-    def _extract_feature(self, images, grid_thw, num_pad=0):
-        """extract feature"""
-        ctx = paddle.no_grad if getattr(self.config, "freeze_vision", False) else contextlib.nullcontext
-        with ctx():
-            image_features = super().forward(images, grid_thw, num_pad)
-        return image_features
-
-    def forward(self, args):
-        """_summary_
-
-        Args:
-            args (_type_): _description_
-
-        Returns:
-            _type_: _description_
-        """
-        raise NotImplementedError
 
 
 @modality_detach
@@ -1427,7 +1131,7 @@ def get_len_and_offset(input_len, group):
     return length_list, offset_list
 
 
-class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
+class Ernie4_5_VLMoeForConditionalGenerationPipe(PipelinePretrainedModel, PipelineLayer):
     """support Pipeline Parallel ERNIE4 """
 
     config_class = Ernie4_5_VLMoeConfig
@@ -1832,23 +1536,20 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
         else:
             raise RuntimeError(f"unknown vision_config: {config.vision_config}")
 
-        # DON'T call PipelinePretrainedModel `__ini__` due to mro issue
-        PipelinePretrainedModel.init(self, config=config)
-
         if config.tie_word_embeddings:
             self.add_sequential_layer(
                 SharedLayerDesc(
                     key="embed_weight_share",
                     layer_func=ErnieVLEmbeddingPipe,
                     shared_weight_attr="embedding_weight",
-                    use_full_recompute=config.use_recompute,
+                    use_full_recompute=config.recompute,
                     config=config,
                 ),
                 "ernie",
             )
         else:
             self.add_sequential_layer(
-                LayerDesc(ErnieVLEmbeddingPipe, config=config, use_full_recompute=config.use_recompute), "ernie"
+                LayerDesc(ErnieVLEmbeddingPipe, config=config, use_full_recompute=config.recompute), "ernie"
             )
 
         no_recompute_layers = get_pp_vp_split_layers(config)
@@ -1856,9 +1557,7 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
         def _need_full_recompute(layer_idx):
             return layer_idx not in no_recompute_layers and config.recompute
 
-        num_empty_layers = config.remove_tail_layer if isinstance(config.remove_tail_layer, int) else 1
-
-        for i in range(config.num_hidden_layers - num_empty_layers):
+        for i in range(config.num_hidden_layers):
             self.add_sequential_layer(
                 LayerDesc(
                     ErnieDecoderLayerPipe,
@@ -1869,25 +1568,13 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
                 f"ernie.layers.{i}",
             )
 
-        if config.remove_tail_layer:
-            for n in range(num_empty_layers):
-                self.add_sequential_layer(
-                    LayerDesc(
-                        EmptyLayer,
-                    ),
-                    f"empty.layers.{n}",
-                )
-        else:
-            for n in range(num_empty_layers):
-                self.add_sequential_layer(
-                    LayerDesc(
-                        ErnieDecoderLayerPipe,
-                        config=create_skip_config_for_refined_recompute(i, config),
-                        layer_idx=i,
-                        use_full_recompute=_need_full_recompute(i),
-                    ),
-                    f"ernie.layers.{n + config.num_hidden_layers - num_empty_layers}",
-                )
+        for i in range(config.add_tail_layers):
+            self.add_sequential_layer(
+                LayerDesc(
+                    EmptyLayer,
+                ),
+                f"empty.layers.{i+config.num_hidden_layers}",
+            )
 
         self.add_sequential_layer(
             LayerDesc(RMSNormPipe if config.use_rmsnorm else LayerNormPipe, config=config), "ernie.norm"
@@ -1933,8 +1620,9 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
             },
             num_virtual_pipeline_stages=config.virtual_pp_degree,
         )
-        self.vision_model = None
         self._modality_param_mapping = None
+        vision_model = DFNRopeVisionTransformerPipe(self.config)
+        self.add_vision_model(encoder=vision_model)
 
     def add_vision_model(
         self,
@@ -1961,9 +1649,7 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
         self.pp_need_data_ranks = ranks
 
     def _set_modality_param_mapping(self, use_stop_grad=True):
-        self._set_pipeline_name_mapping()  # TODO
-        assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-        pp_to_single_mapping = {v: k for k, v in self._pipeline_name_mapping.items()}
+        self._set_pipeline_name_mapping()
         lm_pattern = get_backbone_lm_param_regex(self.config)
         self._modality_param_mapping = defaultdict(lambda: [])
         for name, param in self.named_parameters():
@@ -1978,7 +1664,7 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
             expert_type = getattr(param, "expert_type", None)
             if not use_stop_grad:  # use hook
                 monkey_patch_param_hook(param)
-            name = pp_to_single_mapping[name]
+            name = self._pp_to_single_mapping[name]
             if "vision_model" in name:
                 self._modality_param_mapping["vit"].append((name, param))
                 pipe and pipe._modality_param_mapping["vit"].append((name, param, None))
@@ -2020,128 +1706,3 @@ class ErnieMoEVLForCausalLMPipe(PipelinePretrainedModel, PipelineLayer):
             logger.info(f"Freezing vision parameter: {name}")
             param.stop_gradient = True
         self.vision_model.config.freeze_vision = True
-
-    # Initialize weights and apply final processing
-    def _post_init(self, original_init, *args, **kwargs):
-        """_post_init"""
-        super()._post_init(self, original_init, *args, **kwargs)
-        with paddle.no_grad():
-            if self.config.virtual_pp_degree > 1:
-                pipe_layers = (
-                    self._sub_layers[i]._sub_layers[j]
-                    for i in self._sub_layers
-                    for j in self._sub_layers[i]._sub_layers
-                )
-            else:
-                pipe_layers = (self._sub_layers[i] for i in self._sub_layers)
-
-            for i, layer in enumerate(pipe_layers):
-                if isinstance(layer, ErnieVLEmbeddingPipe):
-                    if getattr(layer, "mm_embed_tokens", None) is not None:
-                        layer.mm_embed_tokens.weight.expert_type = "expert_type_1"
-                        if getattr(layer.mm_embed_tokens, "bias", None) is not None:
-                            layer.mm_embed_tokens.bias.expert_type = "expert_type_1"
-                    if getattr(layer, "audio_embed_tokens", None) is not None:
-                        layer.audio_embed_tokens.weight.expert_type = "expert_type_3"
-                        if getattr(layer.audio_embed_tokens, "bias", None) is not None:
-                            layer.audio_embed_tokens.bias.expert_type = "expert_type_3"
-                    if getattr(layer, "audio_after_norm", None) is not None:
-                        layer.audio_after_norm.weight.expert_type = "expert_type_3"
-                        if getattr(layer.audio_after_norm, "bias", None) is not None:
-                            layer.audio_after_norm.bias.expert_type = "expert_type_3"
-
-                if isinstance(layer, ErnieMoELMHeadPipe):
-                    if getattr(layer, "mm_head", None) is not None:
-                        layer.mm_head.weight.expert_type = "expert_type_1"
-                        if getattr(layer.mm_head, "bias", None) is not None:
-                            layer.mm_head.bias.expert_type = "expert_type_1"
-                    if getattr(layer, "audio_out_module", None) is not None:
-                        layer.audio_out_module.weight.expert_type = "expert_type_3"
-                        if getattr(layer.audio_out_module, "bias", None) is not None:
-                            layer.audio_out_module.bias.expert_type = "expert_type_3"
-
-                if isinstance(layer, ErnieDecoderLayerPipe):
-                    layer_id = layer.layer_idx  # skip_vocab
-                    factor = 1 / math.sqrt(2 * self.config.num_hidden_layers)
-                    logger.info(f"using post init div: layer[{layer_id}].factor={factor}")
-                    layer.self_attn.o_proj.weight.scale_(factor)
-                    if isinstance(layer.mlp, (MOELayer, MOEAllGatherLayerV2)):
-                        for e in layer.mlp.experts:
-                            if isinstance(e, Ernie4_5_MLP):
-                                e.down_proj.weight.scale_(factor)
-                        if getattr(layer.mlp, "dense_experts", None) and isinstance(layer.mlp.dense_experts, Ernie4_5_MLP):
-                            layer.mlp.dense_experts.down_proj.weight.scale_(factor)
-                    else:
-                        layer.mlp.down_proj.weight.scale_(factor)
-
-        if not self.config.disable_pipeline_warmup:
-            self.pipeline_warmup()
-
-    def pipeline_warmup(self):
-        """pipeline_warmup"""
-        # warmup moe layer for pp
-        try:
-            input = None
-            hcg = get_hcg()
-            mp_size = hcg.get_model_parallel_world_size()
-            with paddle.no_grad():
-                ori_state = self.training
-                self.eval()
-                mbs = max(self.config.micro_batch_size, 1)
-                token_type_ids = paddle.zeros([mbs, self.config.max_sequence_length + 1]).astype("int32")
-                hidden_states = paddle.randn(
-                    [mbs * self.config.max_sequence_length // mp_size, self.config.hidden_size]
-                )
-                logger.info(f"mm-moe pp warmup w/ shape: {hidden_states.shape}")
-                input_ids = paddle.zeros([mbs, self.config.max_sequence_length]).astype("int32")
-                input = (token_type_ids, hidden_states)
-                if self._num_virtual_pipeline_stages <= 1:
-                    chunk_id = None
-                    if hcg.get_stage_id() == 0:
-                        input = (token_type_ids, input_ids, None, None)
-                else:
-                    if hcg.get_stage_id() == 0:
-                        chunk_id = 1
-                    else:
-                        chunk_id = 0
-                output = self.forward(input, chunk_id=chunk_id)
-            paddle.device.synchronize()
-            if ori_state:
-                self.train()
-            logger.info("warmup moe layer for pp successfully")
-        except Exception as e:
-            logger.info(f"failed to warmup moe layer for pp: {e}")
-        finally:
-            if isinstance(global_training_logs, dict):
-                global_training_logs.clear()
-            else:
-                global_training_logs.reset()
-
-    def set_state_dict(self, state_dict, *args, **kwargs):
-        """set state dict"""
-        if self._pipeline_name_mapping is None:
-            self._set_pipeline_name_mapping()
-        assert len(self._pipeline_name_mapping) > 0, "The pipeline stage must have parameters!"
-
-        layer_idxs = []
-        if self.config.virtual_pp_degree == 1:
-            _layers = iter(self.run_function)
-        else:
-            _layers = (cc for c in self._model_chunks for cc in c.run_function)
-
-        for layer in _layers:
-            if isinstance(layer, ErnieDecoderLayerPipe):
-                layer_idxs.append(layer.layer_idx)
-        logger.info(f"this pipeline stage has ErnieDecoderLayers: {layer_idxs}")
-        state_dict = moe_statedict_cherry_pick(state_dict, self.config)
-
-        for k in list(state_dict.keys()):
-            v = state_dict.pop(k)
-            if k not in self._pipeline_name_mapping:
-                if f"ernie.{k}" in self._pipeline_name_mapping:
-                    state_dict[self._pipeline_name_mapping[f"ernie.{k}"]] = v
-                continue
-            state_dict[self._pipeline_name_mapping[k]] = v
-        res = super().set_state_dict(state_dict, *args, **kwargs)
-        logger.info(f"ERNIE-MM-MOE-PP - set-state_dict- {res}")
-        return res

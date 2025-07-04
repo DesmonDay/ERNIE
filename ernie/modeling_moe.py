@@ -203,19 +203,18 @@ def get_gate(
                         f"expert_type_{expert_id}"  # Different `expert_type` can have different intermediate-size
                     )
 
-            experts.extend(experts_to_append)
             # To compat with safetensors format.
-    #         index = 0
-    #         for i in range(experts_num):
-    #             if i // num_experts_per_device == moe_rank:
-    #                 experts.append(experts_to_append[index])
-    #                 index += 1
-    #             else:
-    #                 experts.append(None)
+            index = 0
+            for i in range(experts_num):
+                if i // num_experts_per_device == moe_rank:
+                    experts.append(experts_to_append[index])
+                    index += 1
+                else:
+                    experts.append(None)
 
-    # assert (
-    #     len(experts) == moe_num_experts  # including None
-    # ), f"experts.len={len(experts)} != moe_num_experts={moe_num_experts}"
+    assert (
+        len(experts) == moe_num_experts  # including None
+    ), f"experts.len={len(experts)} != moe_num_experts={moe_num_experts}"
 
     gate = gate_class[config.moe_gate.lower()](config, layer_idx=layer_idx, group=config.moe_group)
 

@@ -544,6 +544,7 @@ class Ernie4_5_VLMoeConfig(Ernie4_5_MoeConfig):
         use_recompute_resampler=False,
         resampler_fuse_rms_norm=False,
         moe_layer_feed_fake_token=False,
+        offload_pp_data_chunk_size=0,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -569,6 +570,7 @@ class Ernie4_5_VLMoeConfig(Ernie4_5_MoeConfig):
         self.use_recompute_resampler = use_recompute_resampler
         self.resampler_fuse_rms_norm = resampler_fuse_rms_norm
         self.moe_layer_feed_fake_token = moe_layer_feed_fake_token
+        self.offload_pp_data_chunk_size = offload_pp_data_chunk_size
 
     @property
     def multimodel_experts(self) -> bool:
