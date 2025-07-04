@@ -73,6 +73,7 @@ from paddleformers.trainer.trainer_utils import (
 )
 from paddleformers.trainer.utils import add_start_docstrings
 from paddleformers.transformers.model_utils import _add_variant, unwrap_model
+from paddleformers.utils.log import logger
 
 from ernie.callbacks import (
     ClipGradByAdaptiveNormCallback,
@@ -114,9 +115,6 @@ except Exception:
         hack for paddle develop branch.
         """
         return False
-
-
-logger = logging.getLogger(__name__)
 
 
 def distributed_optimizer_maybe_hack(
@@ -618,7 +616,7 @@ class PreTrainingArguments(TrainingArguments):
             self.per_device_eval_batch_size = (
                 self.per_device_train_batch_size * self.gradient_accumulation_steps
             )  # hack Eval for PP!
-            logger.warn(f"eval_batch_size set to {self.per_device_eval_batch_size} in Pipeline Parallel!")
+            logger.warning(f"eval_batch_size set to {self.per_device_eval_batch_size} in Pipeline Parallel!")
             user_defined_strategy = fleet.fleet._user_defined_strategy
             user_defined_strategy.strategy.pipeline_configs.accumulate_steps = self.gradient_accumulation_steps
             if self.pp_need_data and not self.pp_need_data_degree:
