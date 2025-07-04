@@ -469,20 +469,6 @@ class VariableResolutionResamplerModel(nn.Layer):
             num_attention_heads=config.num_attention_heads,
         )
         res = {"spatial_linear.0.weight": partial(fn, is_column=False)}  # row parallel
-        for k in (
-            "spatial_linear.0.bias",  # row linear bias
-            "spatial_linear.2.weight",
-            "spatial_linear.2.bias",  # linear
-            "spatial_linear.3.weight",
-            "spatial_linear.3.bias",  # layernorm
-            "temporal_linear.0.weight",
-            "temporal_linear.0.weight",  # linear
-            "temporal_linear.2.weight",
-            "temporal_linear.2.bias",  # linear
-            "temporal_linear.3.weight",
-            "temporal_linear.3.bias",  # bias
-        ):
-            res.update({k: lambda x: x[:]})
         return res
 
 
