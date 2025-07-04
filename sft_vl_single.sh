@@ -30,7 +30,8 @@ nohup sh examples/post-training/vl_sft/script/train_gpu_single.sh \
 --global_shuffle_num_examples 1000000 \
 --sequence_parallel 1 \
 --moe_use_aux_free_update_coef 0.0 \
---data_filelist /root/paddlejob/workspace/env_run/output/wenxinhao/SFT_45V/data_config/mm_sft/test_json_h5/ebv_data_sft_codemmsft_1003-part-00000_0.jsonl \
+--train_dataset_path /root/paddlejob/workspace/env_run/output/wenxinhao/SFT_45V/data_config/mm_sft/test_json_h5/ebv_data_sft_codemmsft_1003-part-00000_0.jsonl \
+--train_dataset_prob "1.0" \
 --visual_ld 0.9 \
 --modality_ratio [1,1] \
 --moe_gate_lr_ratio 0.01 \
@@ -39,6 +40,7 @@ nohup sh examples/post-training/vl_sft/script/train_gpu_single.sh \
 --text_sft_task_config "/root/paddlejob/workspace/env_run/output/wenxinhao/SFT_45V/data_config/text_sft/data_config_0120_v1_test.json" \
 --add_sys_token true \
 --number_of_samples_each_epoch 10000000 \
+--trigger_data_prob 1.0 \
 --drop_history_with_k true \
 --prefetch_factor 4 \
 --one_sample_in_one_seq true \

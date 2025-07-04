@@ -226,7 +226,8 @@ class SFTMultimodalDatasetJson(IterableDataset):
 
     def __init__(
         self,
-        dataset_config,
+        train_dataset_path,
+        train_dataset_prob,
         tokenizer,
         image_preprocess,
         seed,
@@ -245,7 +246,8 @@ class SFTMultimodalDatasetJson(IterableDataset):
         data_processor=None,
         **kwargs,
     ):
-        self.dataset_config = dataset_config
+        self.train_dataset_path = train_dataset_path
+        self.train_dataset_prob = train_dataset_prob
         self.tokenizer = tokenizer
         self.vocab = self.tokenizer.get_vocab()
         self.image_token_len = image_token_len
@@ -364,16 +366,25 @@ class SFTMultimodalDatasetJson(IterableDataset):
 
     def _load(self, shuffle_json=True):
         process_fn = self.example_to_feature_stage3
-        part = ExampleSet(
-            file_name=self.dataset_config,
-            src=1,
-            prompt_list=None,
-            shuffle_json=shuffle_json,
-            process_fn=process_fn,
-        )
-        self.task_group[part.src] = part
-        self.src_id_list.append(part.src)
-        self.length += len(part)
+
+        train_dataset_path_list = self.train_dataset_path.split(",")
+        train_dataset_prob_list = self.train_dataset_prob.split(",")
+
+        for src_id, path, prob in zip(range(len(train_dataset_path_list)), train_dataset_path_list, train_dataset_prob_list):
+            part = ExampleSet(
+                file_name=path,
+                src=src_id,
+                prompt_list=None,
+                shuffle_json=shuffle_json,
+                process_fn=process_fn,
+            )
+            self.task_group[part.src] = part
+            self.src_id_list.append(part.src)
+            self.length += len(part)
+            self.weight_list.append(float(prob))
+        
+        weight_sum = sum(self.weight_list)
+        self.weight_list = [item / weight_sum for item in self.weight_list]
 
     def example_to_feature_stage3(self, example):
         """
@@ -488,7 +499,8 @@ class SFTMultimodalDatasetJson(IterableDataset):
 
     def __iter__(self):
         while True:
-            sample_list = np.random.choice(self.src_id_list, size=5120)
+            np.random.seed(make_seed(self.local_seed, self.epoch))
+            sample_list = np.random.choice(self.src_id_list, size=5120, p=self.weight_list)
             self.epoch += 1
             for sample in sample_list:
                 data = self.task_group[int(sample)]
