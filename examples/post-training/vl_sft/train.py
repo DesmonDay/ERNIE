@@ -33,6 +33,7 @@ from paddle.distributed import fleet
 from paddleformers.datasets import IterDataset
 from paddleformers.trainer import PdArgumentParser, get_last_checkpoint
 from paddleformers.utils.tools import get_env_device
+from paddleformers.utils.log import logger
 from pretraining_trainer import PreTrainingArguments
 from trainer import SFTTrainer
 
@@ -60,8 +61,6 @@ from ernie.utils.seed_utils import set_seed
 from data_processor.steps.end2end_processing import End2EndProcessor, End2EndProcessorArguments
 from data_processor.image_preprocessor.image_preprocessor_adaptive import AdaptiveImageProcessor
 from data_processor.tokenizer.get_tokenizer import get_tokenizer
-
-logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -318,94 +317,6 @@ def main():
 
         return {"nll_loss": nll_loss.item(), "ppl": ppl.item(), "num_token": labels.item()}
 
-    def register_pp_reshard_information(num_hidden_layers):
-        from paddleformers.trainer.utils.reshard.pp_reshard import (
-            register_index_layer_func,
-            register_layername_prefix,
-            regitser_extract_layer_name_func,
-        )
-
-        # register layer names
-        register_layername_prefix("column_sequence_parallel_linear")
-        register_layername_prefix("row_sequence_parallel_linear")
-        register_layername_prefix("linear")
-        register_layername_prefix("embedding")
-        register_layername_prefix("create_parameter")
-        register_layername_prefix("lm_head")
-        register_layername_prefix("moe_gate")
-        register_layername_prefix("fused_linear")
-        register_layername_prefix("layer_norm")
-        register_layername_prefix("ernie_mo_elm_head_pipe")
-
-        def extract_layer_name(param_name):
-            patterns = [r"^ernie\.embed_tokens", r"^ernie\.norm", r"^lm_head", r"^ernie\.layers((\.\d+))"]
-            # match 1
-            for p in patterns:
-                match = re.search(p, param_name)
-                if match:
-                    return match.group()
-
-        def index_layer(layer_name):
-            if layer_name == "ernie.embed_tokens":
-                return 0
-            elif layer_name == "ernie.norm":
-                return num_hidden_layers + 1
-            elif layer_name == "lm_head":
-                return num_hidden_layers + 2
-            else:
-                pattern = r"ernie\.layers((\.(\d+)))"
-                match = re.search(pattern, layer_name)
-                assert match
-                index = int(match.group(3)) + 1
-                assert index <= num_hidden_layers, f"{index} {num_hidden_layers}"
-                return index
-
-        def sname_to_tname(pp_model):
-            pp_degree = pp_model._layers._num_stages
-            vpp_degree = pp_model._layers._num_virtual_pipeline_stages
-
-            sname_to_tname = dict()
-            for key, param in pp_model.named_parameters():
-                if vpp_degree == 1:
-                    res = re.search(r"^_layers\.(\d+)((\.\w+)+)", key)
-                else:
-                    res = re.search(r"^_layers\.(\d+)\.(\d+)((\.\w+)+)", key)
-                layer_id = int(res.group(1))
-                sname_suffix = res.group(2) if vpp_degree == 1 else res.group(3)
-                new_sname = "ernie"
-                if layer_id > 0 and layer_id < num_hidden_layers:
-                    new_sname += ".layers." + str(layer_id - 1)
-                if vpp_degree == 1:
-                    if layer_id == num_hidden_layers + 1:
-                        new_sname += ".norm"
-                    if layer_id == num_hidden_layers + 2:
-                        new_sname += ".lm_head"
-                else:
-                    if layer_id == 0 and "embed_tokens" not in key:
-                        new_sname += ".layers." + str(layer_id)
-                    if layer_id == num_hidden_layers:
-                        if int(res.group(2)) == 1:
-                            new_sname += ".norm"
-                        else:
-                            new_sname = "lm_head"
-                new_sname += sname_suffix
-                sname_to_tname[new_sname] = param.name
-            return sname_to_tname
-
-        regitser_extract_layer_name_func(extract_layer_name)
-        register_index_layer_func(index_layer)
-
-        try:
-            from paddleformers.trainer.utils.reshard.pp_reshard import (
-                register_sname_to_tname_func,
-            )
-        except Exception as e:
-            logger.warning(
-                "Third-Party PaddleNLP doesn't support pp-sharding reshard! No need to register sname_to_tname func"
-            )
-        else:
-            register_sname_to_tname_func(sname_to_tname)
-
     # model
     dtype = "float32"
     if args.fp16 and args.fp16_opt_level == "O2":
@@ -482,7 +393,6 @@ def main():
         cfg.moe_with_send_router_loss = args.moe_with_send_router_loss
         cfg.enable_delay_scale_loss = args.enable_delay_scale_loss
         cfg.balanced_image_preprocess = args.balanced_image_preprocess
-        register_pp_reshard_information(cfg.num_hidden_layers)
 
         if args.pp_need_data and not args.pp_need_data_degree:
             args.pp_need_data_degree = args.pipeline_parallel_degree

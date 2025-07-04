@@ -77,13 +77,12 @@ from paddleformers.transformers.model_utils import _add_variant
 from paddleformers.transformers.segment_parallel_utils import split_inputs_sequence_dim
 from paddleformers.utils.batch_sampler import DistributedBatchSampler
 from paddleformers.utils.batch_sampler import DistributedBatchSampler as NlpDistributedBatchSampler
+from paddleformers.utils.log import logger
 
 # from paddlenlp.utils.env import PADDLE_WEIGHTS_NAME
 from pretraining_trainer import PretrainingTrainer
 
 from ernie.dataset.dist_data_loader import DistDataLoader
-
-logger = logging.getLogger(__name__)
 
 
 class SFTTrainer(PretrainingTrainer):
@@ -155,18 +154,6 @@ class SFTTrainer(PretrainingTrainer):
                         shutil.rmtree(resume_from_checkpoint)
                     os.makedirs(resume_from_checkpoint, exist_ok=True)
                     logger.info(f"Reset resume_from_checkpoint to temp directory : {resume_from_checkpoint}")
-
-        if (
-            resume_from_checkpoint is not None
-            and self.args.pdc_download_ckpt
-            # and FLASH_DEVICE not in resume_from_checkpoint
-        ):
-            if self.is_local_process_zero():
-                download_recovery_ckpt_from_pdc(resume_from_checkpoint, self.args.pdc_download_timeout)
-            if self.args.world_size > 1:
-                logger.info("Wait all processes finish downloading...")
-                paddle.distributed.barrier()
-            logger.info("All processes finished downloading from pdc")
 
         # memory metrics - must set up as early as possible
         self._memory_tracker.start()
